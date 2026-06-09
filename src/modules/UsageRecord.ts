@@ -5,13 +5,19 @@ import {
   UsageStats,
   ChangeNotice,
   CitationInfo,
-  PaginationParams
+  PaginationParams,
+  CursorPaginationParams,
+  CursorResponse,
+  IncrementalPullParams,
+  IncrementalResponse
 } from '../types';
 import {
   validateRequiredParams,
   validateParamRange,
   validateParamEnum,
-  ParameterInvalidError
+  ParameterInvalidError,
+  SDKError,
+  ErrorCode
 } from '../errors';
 
 export class UsageRecordModule {
@@ -377,6 +383,319 @@ export class UsageRecordModule {
 
   private generateGBCitation(info: CitationInfo, accessDate: string): string {
     return `${info.provider}. ${info.productName}[DB/OL]. ${info.sourceUrl}. (${dayjs(info.accessDate).format('YYYY-MM-DD')})[${accessDate}].`;
+  }
+
+  public async getUsageRecordsWithCursor(
+    params?: CursorPaginationParams & {
+      authorizationId?: string;
+      productId?: string;
+      status?: 'success' | 'failed';
+    }
+  ): Promise<CursorResponse<UsageRecord>> {
+    const queryParams: Record<string, unknown> = {};
+
+    if (params?.authorizationId) {
+      queryParams.authorizationId = params.authorizationId;
+    }
+    if (params?.productId) {
+      queryParams.productId = params.productId;
+    }
+    if (params?.status) {
+      validateParamEnum('status', params.status, ['success', 'failed']);
+      queryParams.status = params.status;
+    }
+    if (params?.cursor) {
+      queryParams.cursor = params.cursor;
+    }
+    if (params?.limit !== undefined) {
+      validateParamRange('limit', params.limit, 1, 1000);
+      queryParams.limit = params.limit;
+    }
+    if (params?.startTime) {
+      queryParams.startTime = params.startTime;
+    }
+    if (params?.endTime) {
+      queryParams.endTime = params.endTime;
+    }
+
+    const result = await this.client.get<CursorResponse<UsageRecord>>(
+      '/api/v1/usage/records/cursor',
+      queryParams
+    );
+
+    return result;
+  }
+
+  public async getUsageRecordsIncremental(
+    params?: IncrementalPullParams & {
+      authorizationId?: string;
+      productId?: string;
+      status?: 'success' | 'failed';
+    }
+  ): Promise<IncrementalResponse<UsageRecord>> {
+    const queryParams: Record<string, unknown> = {};
+
+    if (params?.authorizationId) {
+      queryParams.authorizationId = params.authorizationId;
+    }
+    if (params?.productId) {
+      queryParams.productId = params.productId;
+    }
+    if (params?.status) {
+      validateParamEnum('status', params.status, ['success', 'failed']);
+      queryParams.status = params.status;
+    }
+    if (params?.cursor) {
+      queryParams.cursor = params.cursor;
+    }
+    if (params?.limit !== undefined) {
+      validateParamRange('limit', params.limit, 1, 1000);
+      queryParams.limit = params.limit;
+    }
+    if (params?.lastSyncTime) {
+      queryParams.lastSyncTime = params.lastSyncTime;
+    }
+    if (params?.includeDeleted !== undefined) {
+      queryParams.includeDeleted = params.includeDeleted;
+    }
+    if (params?.startTime) {
+      queryParams.startTime = params.startTime;
+    }
+    if (params?.endTime) {
+      queryParams.endTime = params.endTime;
+    }
+
+    const result = await this.client.get<IncrementalResponse<UsageRecord>>(
+      '/api/v1/usage/records/incremental',
+      queryParams
+    );
+
+    return result;
+  }
+
+  public async getChangeNoticesWithCursor(
+    params?: CursorPaginationParams & {
+      productId?: string;
+      type?: ChangeNotice['type'];
+      level?: ChangeNotice['level'];
+      unreadOnly?: boolean;
+    }
+  ): Promise<CursorResponse<ChangeNotice>> {
+    const queryParams: Record<string, unknown> = {};
+
+    if (params?.productId) {
+      queryParams.productId = params.productId;
+    }
+    if (params?.type) {
+      validateParamEnum('type', params.type, [
+        'update',
+        'deprecation',
+        'price_change',
+        'policy_change',
+        'maintenance'
+      ]);
+      queryParams.type = params.type;
+    }
+    if (params?.level) {
+      validateParamEnum('level', params.level, ['info', 'warning', 'critical']);
+      queryParams.level = params.level;
+    }
+    if (params?.unreadOnly !== undefined) {
+      queryParams.unreadOnly = params.unreadOnly;
+    }
+    if (params?.cursor) {
+      queryParams.cursor = params.cursor;
+    }
+    if (params?.limit !== undefined) {
+      validateParamRange('limit', params.limit, 1, 1000);
+      queryParams.limit = params.limit;
+    }
+    if (params?.startTime) {
+      queryParams.startTime = params.startTime;
+    }
+    if (params?.endTime) {
+      queryParams.endTime = params.endTime;
+    }
+
+    const result = await this.client.get<CursorResponse<ChangeNotice>>(
+      '/api/v1/usage/notices/cursor',
+      queryParams
+    );
+
+    return result;
+  }
+
+  public async getChangeNoticesIncremental(
+    params?: IncrementalPullParams & {
+      productId?: string;
+      type?: ChangeNotice['type'];
+      level?: ChangeNotice['level'];
+      unreadOnly?: boolean;
+    }
+  ): Promise<IncrementalResponse<ChangeNotice>> {
+    const queryParams: Record<string, unknown> = {};
+
+    if (params?.productId) {
+      queryParams.productId = params.productId;
+    }
+    if (params?.type) {
+      validateParamEnum('type', params.type, [
+        'update',
+        'deprecation',
+        'price_change',
+        'policy_change',
+        'maintenance'
+      ]);
+      queryParams.type = params.type;
+    }
+    if (params?.level) {
+      validateParamEnum('level', params.level, ['info', 'warning', 'critical']);
+      queryParams.level = params.level;
+    }
+    if (params?.unreadOnly !== undefined) {
+      queryParams.unreadOnly = params.unreadOnly;
+    }
+    if (params?.cursor) {
+      queryParams.cursor = params.cursor;
+    }
+    if (params?.limit !== undefined) {
+      validateParamRange('limit', params.limit, 1, 1000);
+      queryParams.limit = params.limit;
+    }
+    if (params?.lastSyncTime) {
+      queryParams.lastSyncTime = params.lastSyncTime;
+    }
+    if (params?.includeDeleted !== undefined) {
+      queryParams.includeDeleted = params.includeDeleted;
+    }
+    if (params?.startTime) {
+      queryParams.startTime = params.startTime;
+    }
+    if (params?.endTime) {
+      queryParams.endTime = params.endTime;
+    }
+
+    const result = await this.client.get<IncrementalResponse<ChangeNotice>>(
+      '/api/v1/usage/notices/incremental',
+      queryParams
+    );
+
+    if (this.client.isCacheEnabled()) {
+      const affectedProductIds = new Set(result.list.map((n) => n.productId));
+      for (const productId of affectedProductIds) {
+        this.client.invalidateCacheByProductId(productId);
+      }
+    }
+
+    return result;
+  }
+
+  public async syncAllUsageRecords(
+    params: {
+      authorizationId?: string;
+      productId?: string;
+      status?: 'success' | 'failed';
+      lastSyncTime?: string;
+      batchSize?: number;
+      onBatch?: (batch: UsageRecord[], cursor: string, hasMore: boolean) => void | Promise<void>;
+    }
+  ): Promise<{
+    totalRecords: number;
+    batches: number;
+    lastCursor: string | null;
+    syncTime: string;
+  }> {
+    let cursor: string | undefined = params.lastSyncTime;
+    let hasMore = true;
+    let totalRecords = 0;
+    let batches = 0;
+    const batchSize = params.batchSize || 100;
+
+    while (hasMore) {
+      const result = await this.getUsageRecordsIncremental({
+        authorizationId: params.authorizationId,
+        productId: params.productId,
+        status: params.status,
+        cursor,
+        limit: batchSize,
+        lastSyncTime: params.lastSyncTime
+      });
+
+      batches++;
+      totalRecords += result.list.length;
+
+      if (params.onBatch) {
+        await params.onBatch(result.list, result.nextCursor || '', result.hasMore);
+      }
+
+      hasMore = result.hasMore;
+      cursor = result.nextCursor || undefined;
+
+      if (!hasMore) {
+        break;
+      }
+    }
+
+    return {
+      totalRecords,
+      batches,
+      lastCursor: cursor || null,
+      syncTime: new Date().toISOString()
+    };
+  }
+
+  public async syncAllChangeNotices(
+    params: {
+      productId?: string;
+      type?: ChangeNotice['type'];
+      level?: ChangeNotice['level'];
+      lastSyncTime?: string;
+      batchSize?: number;
+      onBatch?: (batch: ChangeNotice[], cursor: string, hasMore: boolean) => void | Promise<void>;
+    }
+  ): Promise<{
+    totalNotices: number;
+    batches: number;
+    lastCursor: string | null;
+    syncTime: string;
+  }> {
+    let cursor: string | undefined = params.lastSyncTime;
+    let hasMore = true;
+    let totalNotices = 0;
+    let batches = 0;
+    const batchSize = params.batchSize || 100;
+
+    while (hasMore) {
+      const result = await this.getChangeNoticesIncremental({
+        productId: params.productId,
+        type: params.type,
+        level: params.level,
+        cursor,
+        limit: batchSize,
+        lastSyncTime: params.lastSyncTime
+      });
+
+      batches++;
+      totalNotices += result.list.length;
+
+      if (params.onBatch) {
+        await params.onBatch(result.list, result.nextCursor || '', result.hasMore);
+      }
+
+      hasMore = result.hasMore;
+      cursor = result.nextCursor || undefined;
+
+      if (!hasMore) {
+        break;
+      }
+    }
+
+    return {
+      totalNotices,
+      batches,
+      lastCursor: cursor || null,
+      syncTime: new Date().toISOString()
+    };
   }
 
   private generateBibTeX(info: CitationInfo, accessDate: string): string {

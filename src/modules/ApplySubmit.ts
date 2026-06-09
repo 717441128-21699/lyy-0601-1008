@@ -13,7 +13,10 @@ import {
   validateParamRange,
   validateEmail,
   validatePhone,
-  ParameterInvalidError
+  ParameterInvalidError,
+  MaterialMissingError,
+  MaterialInvalidError,
+  isParameterError
 } from '../errors';
 
 export class ApplySubmit {
@@ -86,31 +89,38 @@ export class ApplySubmit {
   }
 
   public async submitApplication(request: ApplyRequest): Promise<ApplyResponse> {
-    this.validateApplyRequest(request);
+    try {
+      this.validateApplyRequest(request);
 
-    const requiredMaterials = await this.getRequiredMaterials(request.productId);
-    const validation = this.validateMaterials(request.materials, requiredMaterials);
+      const requiredMaterials = await this.getRequiredMaterials(request.productId);
+      const validation = this.validateMaterials(request.materials, requiredMaterials);
 
-    if (!validation.valid) {
-      const errors: string[] = [];
-      if (validation.missingMaterials.length > 0) {
-        errors.push(`缺少材料: ${validation.missingMaterials.join(', ')}`);
+      if (!validation.valid) {
+        if (validation.missingMaterials.length > 0) {
+          throw new MaterialMissingError(validation.missingMaterials[0]);
+        }
+        if (validation.invalidMaterials.length > 0) {
+          const firstInvalid = validation.invalidMaterials[0];
+          throw new MaterialInvalidError(firstInvalid.name, firstInvalid.reason);
+        }
       }
-      if (validation.invalidMaterials.length > 0) {
-        errors.push(
-          `无效材料: ${validation.invalidMaterials.map((m) => `${m.name}(${m.reason})`).join(', ')}`
-        );
+
+      const result = await this.client.post<ApplyResponse>('/api/v1/apply/submit', {
+        ...request,
+        purpose: request.purpose,
+        purposeName: this.purposeNames[request.purpose]
+      } as unknown as Record<string, unknown>);
+
+      return result;
+    } catch (error) {
+      if (isParameterError(error)) {
+        throw error;
       }
-      throw new ParameterInvalidError('materials', errors.join('; '));
+      if (error instanceof Error && isParameterError(error)) {
+        throw error;
+      }
+      throw error;
     }
-
-    const result = await this.client.post<ApplyResponse>('/api/v1/apply/submit', {
-      ...request,
-      purpose: request.purpose,
-      purposeName: this.purposeNames[request.purpose]
-    } as unknown as Record<string, unknown>);
-
-    return result;
   }
 
   public async getApplicationList(params?: {

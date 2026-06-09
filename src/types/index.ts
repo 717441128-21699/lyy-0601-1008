@@ -306,4 +306,55 @@ export interface UsageStats {
   }>;
 }
 
+export interface BatchResult<T> {
+  success: boolean;
+  data: T | null;
+  error?: {
+    code: number;
+    message: string;
+    traceId?: string;
+  };
+}
+
+export interface BatchResponse<T> {
+  total: number;
+  successCount: number;
+  failedCount: number;
+  results: Array<{
+    id: string;
+    success: boolean;
+    data: T | null;
+    error?: {
+      code: number;
+      message: string;
+      traceId?: string;
+    };
+  }>;
+}
+
+export interface CursorPaginationParams {
+  cursor?: string;
+  limit?: number;
+  startTime?: string;
+  endTime?: string;
+}
+
+export interface CursorResponse<T> {
+  list: T[];
+  nextCursor: string | null;
+  hasMore: boolean;
+  total?: number;
+}
+
+export interface IncrementalPullParams extends CursorPaginationParams {
+  lastSyncTime?: string;
+  includeDeleted?: boolean;
+}
+
+export interface IncrementalResponse<T> extends CursorResponse<T> {
+  syncTime: string;
+  updatedCount: number;
+  deletedCount: number;
+}
+
 export * from '../errors';

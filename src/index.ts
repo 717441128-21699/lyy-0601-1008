@@ -1,15 +1,33 @@
-import { HttpClient } from './client/HttpClient';
+import { HttpClient, HttpClientOptions, CacheConfig } from './client/HttpClient';
 import { CatalogSearch } from './modules/CatalogSearch';
 import { ResourceDetailModule } from './modules/ResourceDetail';
 import { ApplySubmit } from './modules/ApplySubmit';
 import { AuthorizationStatus } from './modules/AuthorizationStatus';
 import { UsageRecordModule } from './modules/UsageRecord';
 import { SDKConfig } from './types';
-import { SDKError, ParameterMissingError } from './errors';
+import { SDKError, ParameterMissingError, isParameterError } from './errors';
+import { IRequestAdapter } from './client/adapter/IRequestAdapter';
+import { ICache } from './cache/ICache';
+import { MemoryCache } from './cache/MemoryCache';
+import { MockRequestAdapter } from './client/adapter/MockRequestAdapter';
+import { MockDataGenerator } from './client/adapter/MockDataGenerator';
+
+export interface DataCatalogSDKOptions {
+  adapter?: IRequestAdapter;
+  cache?: ICache;
+  cacheConfig?: CacheConfig;
+  enableMock?: boolean;
+  mockConfig?: {
+    delay?: number;
+    failureRate?: number;
+    failOnParamValidation?: boolean;
+  };
+}
 
 export class DataCatalogSDK {
   private readonly config: SDKConfig;
   private readonly client: HttpClient;
+  private readonly options: DataCatalogSDKOptions;
 
   public readonly catalog: CatalogSearch;
   public readonly resource: ResourceDetailModule;
@@ -17,10 +35,29 @@ export class DataCatalogSDK {
   public readonly authorization: AuthorizationStatus;
   public readonly usage: UsageRecordModule;
 
-  constructor(config: SDKConfig) {
+  constructor(config: SDKConfig, options: DataCatalogSDKOptions = {}) {
     this.validateConfig(config);
     this.config = config;
-    this.client = new HttpClient(config);
+    this.options = options;
+
+    let adapter: IRequestAdapter | undefined = options.adapter;
+    if (options.enableMock && !adapter) {
+      adapter = new MockRequestAdapter({
+        baseUrl: config.baseUrl,
+        timeout: config.timeout || 30000,
+        delay: options.mockConfig?.delay ?? 100,
+        failureRate: options.mockConfig?.failureRate ?? 0,
+        failOnParamValidation: options.mockConfig?.failOnParamValidation ?? true
+      });
+    }
+
+    const httpClientOptions: HttpClientOptions = {
+      adapter,
+      cache: options.cache,
+      cacheConfig: options.cacheConfig
+    };
+
+    this.client = new HttpClient(config, httpClientOptions);
 
     this.catalog = new CatalogSearch(this.client);
     this.resource = new ResourceDetailModule(this.client);
@@ -84,15 +121,88 @@ export class DataCatalogSDK {
       };
     }
   }
+
+  public setCacheEnabled(enabled: boolean): void {
+    this.client.setCacheEnabled(enabled);
+  }
+
+  public isCacheEnabled(): boolean {
+    return this.client.isCacheEnabled();
+  }
+
+  public invalidateCacheByProductId(productId: string): number {
+    return this.client.invalidateCacheByProductId(productId);
+  }
+
+  public invalidateCacheByTag(tag: string): number {
+    return this.client.invalidateCacheByTag(tag);
+  }
+
+  public invalidateCacheByPattern(pattern: RegExp | string): number {
+    return this.client.invalidateCacheByPattern(pattern);
+  }
+
+  public invalidateAllCache(): void {
+    this.client.invalidateAllCache();
+  }
+
+  public invalidateAllSearchCache(): number {
+    return this.client.invalidateAllSearchCache();
+  }
+
+  public invalidateAllResourceCache(): number {
+    return this.client.invalidateAllResourceCache();
+  }
+
+  public getCacheStats(): {
+    size: number;
+    hits: number;
+    misses: number;
+    hitRate: number;
+  } {
+    return this.client.getCacheStats();
+  }
+
+  public getAdapter(): IRequestAdapter {
+    return this.client.getAdapter();
+  }
+
+  public getCache(): ICache {
+    return this.client.getCache();
+  }
+
+  public static createMockSDK(
+    config: Partial<SDKConfig> = {},
+    mockConfig?: DataCatalogSDKOptions['mockConfig']
+  ): DataCatalogSDK {
+    const defaultConfig: SDKConfig = {
+      baseUrl: 'https://mock-api.example.com',
+      appKey: 'mock-app-key',
+      appSecret: 'mock-app-secret',
+      ...config
+    };
+
+    return new DataCatalogSDK(defaultConfig, {
+      enableMock: true,
+      mockConfig
+    });
+  }
+
+  public static isParameterError = isParameterError;
 }
 
 export * from './types';
 export * from './errors';
-export { HttpClient } from './client/HttpClient';
+export { HttpClient, HttpClientOptions, CacheConfig } from './client/HttpClient';
 export { CatalogSearch } from './modules/CatalogSearch';
 export { ResourceDetailModule } from './modules/ResourceDetail';
 export { ApplySubmit } from './modules/ApplySubmit';
 export { AuthorizationStatus } from './modules/AuthorizationStatus';
 export { UsageRecordModule } from './modules/UsageRecord';
+export { IRequestAdapter, RequestOptions } from './client/adapter/IRequestAdapter';
+export { MockRequestAdapter } from './client/adapter/MockRequestAdapter';
+export { MockDataGenerator } from './client/adapter/MockDataGenerator';
+export { ICache, CacheEntry, CacheOptions } from './cache/ICache';
+export { MemoryCache } from './cache/MemoryCache';
 
 export default DataCatalogSDK;

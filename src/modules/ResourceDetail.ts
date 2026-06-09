@@ -1,6 +1,6 @@
 import { HttpClient } from '../client/HttpClient';
-import { ResourceDetail, DataField, SampleData, DataProduct } from '../types';
-import { validateRequiredParams } from '../errors';
+import { ResourceDetail, DataField, SampleData, DataProduct, BatchResponse, BatchResult } from '../types';
+import { validateRequiredParams, validateParamRange, SDKError, ErrorCode, isParameterError } from '../errors';
 
 export class ResourceDetailModule {
   private readonly client: HttpClient;
@@ -280,5 +280,233 @@ export class ResourceDetailModule {
       .join(', ');
 
     return `## 数据样例摘要\n\n${summary}\n\n**数据记录数**: ${recordCount} 条\n\n**数据质量**: ${qualityItems}\n\n**包含字段**: ${sampleData.fields.join(', ')}`;
+  }
+
+  public async batchGetDetails(
+    productIds: string[],
+    options?: {
+      skipCache?: boolean;
+      concurrency?: number;
+    }
+  ): Promise<BatchResponse<ResourceDetail>> {
+    if (!productIds || productIds.length === 0) {
+      throw new SDKError(ErrorCode.PARAM_MISSING, 'productIds 不能为空');
+    }
+
+    validateParamRange('productIds.length', productIds.length, 1, 100);
+
+    const concurrency = options?.concurrency || 10;
+    const results: BatchResponse<ResourceDetail>['results'] = [];
+    let successCount = 0;
+    let failedCount = 0;
+
+    for (let i = 0; i < productIds.length; i += concurrency) {
+      const batch = productIds.slice(i, i + concurrency);
+      const batchPromises = batch.map(async (productId) => {
+        try {
+          validateRequiredParams({ productId }, ['productId']);
+
+          const data = await this.client.get<ResourceDetail>(
+            `/api/v1/resources/${productId}/detail`,
+            undefined,
+            { skipCache: options?.skipCache }
+          );
+
+          successCount++;
+          return {
+            id: productId,
+            success: true as const,
+            data,
+            error: undefined
+          };
+        } catch (error) {
+          failedCount++;
+          let errorInfo = {
+            code: ErrorCode.UNKNOWN_ERROR,
+            message: '未知错误',
+            traceId: ''
+          };
+
+          if (error instanceof SDKError) {
+            errorInfo = {
+              code: error.code,
+              message: error.message,
+              traceId: error.traceId
+            };
+          } else if (error instanceof Error) {
+            errorInfo.message = error.message;
+          }
+
+          return {
+            id: productId,
+            success: false as const,
+            data: null,
+            error: errorInfo
+          };
+        }
+      });
+
+      const batchResults = await Promise.all(batchPromises);
+      results.push(...batchResults);
+    }
+
+    return {
+      total: productIds.length,
+      successCount,
+      failedCount,
+      results
+    };
+  }
+
+  public async batchGetBasicInfos(
+    productIds: string[],
+    options?: {
+      skipCache?: boolean;
+      concurrency?: number;
+    }
+  ): Promise<BatchResponse<DataProduct>> {
+    if (!productIds || productIds.length === 0) {
+      throw new SDKError(ErrorCode.PARAM_MISSING, 'productIds 不能为空');
+    }
+
+    validateParamRange('productIds.length', productIds.length, 1, 100);
+
+    const concurrency = options?.concurrency || 10;
+    const results: BatchResponse<DataProduct>['results'] = [];
+    let successCount = 0;
+    let failedCount = 0;
+
+    for (let i = 0; i < productIds.length; i += concurrency) {
+      const batch = productIds.slice(i, i + concurrency);
+      const batchPromises = batch.map(async (productId) => {
+        try {
+          validateRequiredParams({ productId }, ['productId']);
+
+          const data = await this.client.get<DataProduct>(
+            `/api/v1/resources/${productId}/basic`,
+            undefined,
+            { skipCache: options?.skipCache }
+          );
+
+          successCount++;
+          return {
+            id: productId,
+            success: true as const,
+            data,
+            error: undefined
+          };
+        } catch (error) {
+          failedCount++;
+          let errorInfo = {
+            code: ErrorCode.UNKNOWN_ERROR,
+            message: '未知错误',
+            traceId: ''
+          };
+
+          if (error instanceof SDKError) {
+            errorInfo = {
+              code: error.code,
+              message: error.message,
+              traceId: error.traceId
+            };
+          } else if (error instanceof Error) {
+            errorInfo.message = error.message;
+          }
+
+          return {
+            id: productId,
+            success: false as const,
+            data: null,
+            error: errorInfo
+          };
+        }
+      });
+
+      const batchResults = await Promise.all(batchPromises);
+      results.push(...batchResults);
+    }
+
+    return {
+      total: productIds.length,
+      successCount,
+      failedCount,
+      results
+    };
+  }
+
+  public async batchGetFields(
+    productIds: string[],
+    options?: {
+      skipCache?: boolean;
+      concurrency?: number;
+    }
+  ): Promise<BatchResponse<DataField[]>> {
+    if (!productIds || productIds.length === 0) {
+      throw new SDKError(ErrorCode.PARAM_MISSING, 'productIds 不能为空');
+    }
+
+    validateParamRange('productIds.length', productIds.length, 1, 100);
+
+    const concurrency = options?.concurrency || 10;
+    const results: BatchResponse<DataField[]>['results'] = [];
+    let successCount = 0;
+    let failedCount = 0;
+
+    for (let i = 0; i < productIds.length; i += concurrency) {
+      const batch = productIds.slice(i, i + concurrency);
+      const batchPromises = batch.map(async (productId) => {
+        try {
+          validateRequiredParams({ productId }, ['productId']);
+
+          const data = await this.client.get<DataField[]>(
+            `/api/v1/resources/${productId}/fields`,
+            undefined,
+            { skipCache: options?.skipCache }
+          );
+
+          successCount++;
+          return {
+            id: productId,
+            success: true as const,
+            data,
+            error: undefined
+          };
+        } catch (error) {
+          failedCount++;
+          let errorInfo = {
+            code: ErrorCode.UNKNOWN_ERROR,
+            message: '未知错误',
+            traceId: ''
+          };
+
+          if (error instanceof SDKError) {
+            errorInfo = {
+              code: error.code,
+              message: error.message,
+              traceId: error.traceId
+            };
+          } else if (error instanceof Error) {
+            errorInfo.message = error.message;
+          }
+
+          return {
+            id: productId,
+            success: false as const,
+            data: null,
+            error: errorInfo
+          };
+        }
+      });
+
+      const batchResults = await Promise.all(batchPromises);
+      results.push(...batchResults);
+    }
+
+    return {
+      total: productIds.length,
+      successCount,
+      failedCount,
+      results
+    };
   }
 }

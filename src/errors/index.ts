@@ -117,6 +117,36 @@ export class InternalServerError extends SDKError {
   }
 }
 
+export class MaterialMissingError extends SDKError {
+  constructor(materialName: string, traceId?: string) {
+    super(ErrorCode.MATERIAL_MISSING, `缺少申请材料: ${materialName}`, traceId);
+    this.name = 'MaterialMissingError';
+    Object.setPrototypeOf(this, MaterialMissingError.prototype);
+  }
+}
+
+export class MaterialInvalidError extends SDKError {
+  constructor(materialName: string, reason: string, traceId?: string) {
+    super(ErrorCode.MATERIAL_INVALID, `申请材料 ${materialName} 无效: ${reason}`, traceId);
+    this.name = 'MaterialInvalidError';
+    Object.setPrototypeOf(this, MaterialInvalidError.prototype);
+  }
+}
+
+export function isParameterError(error: unknown): error is ParameterMissingError | ParameterInvalidError | MaterialMissingError | MaterialInvalidError {
+  return (
+    error instanceof ParameterMissingError ||
+    error instanceof ParameterInvalidError ||
+    error instanceof MaterialMissingError ||
+    error instanceof MaterialInvalidError ||
+    (error instanceof SDKError &&
+      (error.code === ErrorCode.PARAM_MISSING ||
+        error.code === ErrorCode.PARAM_INVALID ||
+        error.code === ErrorCode.MATERIAL_MISSING ||
+        error.code === ErrorCode.MATERIAL_INVALID))
+  );
+}
+
 export function handleApiError(response: {
   code: number;
   message: string;
@@ -124,10 +154,39 @@ export function handleApiError(response: {
   data?: unknown;
 }): SDKError {
   switch (response.code) {
-    case ErrorCode.PARAM_MISSING:
-      return new SDKError(response.code, response.message, response.traceId);
-    case ErrorCode.PARAM_INVALID:
+    case ErrorCode.PARAM_MISSING: {
+      const paramMatch = response.message.match(/缺少必填参数[：: ]*([^\s,，]+)/);
+      if (paramMatch && paramMatch[1]) {
+        return new ParameterMissingError(paramMatch[1], response.traceId);
+      }
+      const materialMatch = response.message.match(/缺少材料[：: ]*([^\s,，]+)/);
+      if (materialMatch && materialMatch[1]) {
+        return new MaterialMissingError(materialMatch[1], response.traceId);
+      }
+      return new ParameterMissingError('request', response.traceId);
+    }
+    case ErrorCode.MATERIAL_MISSING: {
+      const match = response.message.match(/材料[：: ]*([^\s,，]+)/);
+      const materialName = match ? match[1] : 'unknown';
+      return new MaterialMissingError(materialName, response.traceId);
+    }
+    case ErrorCode.PARAM_INVALID: {
+      const paramMatch = response.message.match(/参数[：: ]*([^\s,，]+)[^:：]*[：: ]*(.+)/);
+      if (paramMatch && paramMatch[1] && paramMatch[2]) {
+        return new ParameterInvalidError(paramMatch[1], paramMatch[2].trim(), response.traceId);
+      }
+      const materialMatch = response.message.match(/材料[：: ]*([^\s,，]+)[^:：]*[：: ]*(.+)/);
+      if (materialMatch && materialMatch[1] && materialMatch[2]) {
+        return new MaterialInvalidError(materialMatch[1], materialMatch[2].trim(), response.traceId);
+      }
       return new ParameterInvalidError('request', response.message, response.traceId);
+    }
+    case ErrorCode.MATERIAL_INVALID: {
+      const match = response.message.match(/材料[：: ]*([^\s,，]+)[^:：]*[：: ]*(.+)/);
+      const materialName = match ? match[1] : 'unknown';
+      const reason = match && match[2] ? match[2].trim() : response.message;
+      return new MaterialInvalidError(materialName, reason, response.traceId);
+    }
     case ErrorCode.UNAUTHORIZED:
       return new UnauthorizedError(response.message, response.traceId);
     case ErrorCode.TOKEN_EXPIRED:

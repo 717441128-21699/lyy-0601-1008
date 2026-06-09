@@ -5,13 +5,16 @@ import {
   ExpireReminder,
   AuditRecord,
   AuditStatus,
-  PaginationParams
+  PaginationParams,
+  BatchResponse
 } from '../types';
 import {
   validateRequiredParams,
   validateParamRange,
   validateParamEnum,
-  ParameterInvalidError
+  ParameterInvalidError,
+  SDKError,
+  ErrorCode
 } from '../errors';
 
 export class AuthorizationStatus {
@@ -374,6 +377,186 @@ export class AuthorizationStatus {
 
   public isExpired(validTo: string): boolean {
     return dayjs(validTo).isBefore(dayjs());
+  }
+
+  public async batchCheckAuthorizationValid(
+    authorizationIds: string[],
+    options?: {
+      concurrency?: number;
+    }
+  ): Promise<BatchResponse<{
+    valid: boolean;
+    reason?: string;
+    authorization?: Authorization;
+  }>> {
+    if (!authorizationIds || authorizationIds.length === 0) {
+      throw new SDKError(ErrorCode.PARAM_MISSING, 'authorizationIds 不能为空');
+    }
+
+    validateParamRange('authorizationIds.length', authorizationIds.length, 1, 100);
+
+    const concurrency = options?.concurrency || 10;
+    const results: BatchResponse<{
+      valid: boolean;
+      reason?: string;
+      authorization?: Authorization;
+    }>['results'] = [];
+    let successCount = 0;
+    let failedCount = 0;
+
+    for (let i = 0; i < authorizationIds.length; i += concurrency) {
+      const batch = authorizationIds.slice(i, i + concurrency);
+      const batchPromises = batch.map(async (authorizationId) => {
+        try {
+          validateRequiredParams({ authorizationId }, ['authorizationId']);
+
+          const data = await this.checkAuthorizationValid(authorizationId);
+
+          successCount++;
+          return {
+            id: authorizationId,
+            success: true as const,
+            data,
+            error: undefined
+          };
+        } catch (error) {
+          failedCount++;
+          let errorInfo = {
+            code: ErrorCode.UNKNOWN_ERROR,
+            message: '未知错误',
+            traceId: ''
+          };
+
+          if (error instanceof SDKError) {
+            errorInfo = {
+              code: error.code,
+              message: error.message,
+              traceId: error.traceId
+            };
+          } else if (error instanceof Error) {
+            errorInfo.message = error.message;
+          }
+
+          return {
+            id: authorizationId,
+            success: false as const,
+            data: null,
+            error: errorInfo
+          };
+        }
+      });
+
+      const batchResults = await Promise.all(batchPromises);
+      results.push(...batchResults);
+    }
+
+    return {
+      total: authorizationIds.length,
+      successCount,
+      failedCount,
+      results
+    };
+  }
+
+  public async batchGetAuthorizationScopes(
+    authorizationIds: string[],
+    options?: {
+      concurrency?: number;
+    }
+  ): Promise<BatchResponse<{
+    authorizationId: string;
+    productId: string;
+    productName: string;
+    scope: {
+      callLimit: number;
+      callCount: number;
+      remainingCalls: number;
+      ipWhitelist?: string[];
+      dataRange?: string[];
+      features?: string[];
+    };
+    validFrom: string;
+    validTo: string;
+    daysRemaining: number;
+  }>> {
+    if (!authorizationIds || authorizationIds.length === 0) {
+      throw new SDKError(ErrorCode.PARAM_MISSING, 'authorizationIds 不能为空');
+    }
+
+    validateParamRange('authorizationIds.length', authorizationIds.length, 1, 100);
+
+    const concurrency = options?.concurrency || 10;
+    const results: BatchResponse<{
+      authorizationId: string;
+      productId: string;
+      productName: string;
+      scope: {
+        callLimit: number;
+        callCount: number;
+        remainingCalls: number;
+        ipWhitelist?: string[];
+        dataRange?: string[];
+        features?: string[];
+      };
+      validFrom: string;
+      validTo: string;
+      daysRemaining: number;
+    }>['results'] = [];
+    let successCount = 0;
+    let failedCount = 0;
+
+    for (let i = 0; i < authorizationIds.length; i += concurrency) {
+      const batch = authorizationIds.slice(i, i + concurrency);
+      const batchPromises = batch.map(async (authorizationId) => {
+        try {
+          validateRequiredParams({ authorizationId }, ['authorizationId']);
+
+          const data = await this.getAuthorizationScope(authorizationId);
+
+          successCount++;
+          return {
+            id: authorizationId,
+            success: true as const,
+            data,
+            error: undefined
+          };
+        } catch (error) {
+          failedCount++;
+          let errorInfo = {
+            code: ErrorCode.UNKNOWN_ERROR,
+            message: '未知错误',
+            traceId: ''
+          };
+
+          if (error instanceof SDKError) {
+            errorInfo = {
+              code: error.code,
+              message: error.message,
+              traceId: error.traceId
+            };
+          } else if (error instanceof Error) {
+            errorInfo.message = error.message;
+          }
+
+          return {
+            id: authorizationId,
+            success: false as const,
+            data: null,
+            error: errorInfo
+          };
+        }
+      });
+
+      const batchResults = await Promise.all(batchPromises);
+      results.push(...batchResults);
+    }
+
+    return {
+      total: authorizationIds.length,
+      successCount,
+      failedCount,
+      results
+    };
   }
 
   private calculateProgress(status: AuditStatus): number {
