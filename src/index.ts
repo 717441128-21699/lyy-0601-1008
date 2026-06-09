@@ -199,8 +199,14 @@ export type {
   AuthorizationInvalidReason,
   BatchQueryStatus,
   DetailedBatchResult,
-  DetailedBatchResponse
+  DetailedBatchResponse,
+  SyncTaskState,
+  SyncTaskStatus,
+  RetryPolicy,
+  SyncTaskOptions,
+  SyncWithTaskResult
 } from './types';
+export { DEFAULT_RETRY_POLICY } from './types';
 export * from './errors';
 export { HttpClient, HttpClientOptions, CacheConfig } from './client/HttpClient';
 export { CatalogSearch } from './modules/CatalogSearch';

@@ -11,7 +11,13 @@ import {
   IncrementalPullParams,
   IncrementalResponse,
   SyncCheckpoint,
-  SyncResultWithCheckpoint
+  SyncResultWithCheckpoint,
+  SyncTaskState,
+  SyncTaskStatus,
+  RetryPolicy,
+  SyncTaskOptions,
+  SyncWithTaskResult,
+  DEFAULT_RETRY_POLICY
 } from '../types';
 import {
   validateRequiredParams,
@@ -22,11 +28,141 @@ import {
   ErrorCode
 } from '../errors';
 
+function generateTaskId(): string {
+  return `sync-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+}
+
 export class UsageRecordModule {
   private readonly client: HttpClient;
+  private readonly taskStates: Map<string, SyncTaskState> = new Map();
 
   constructor(client: HttpClient) {
     this.client = client;
+  }
+
+  public getSyncTaskStatus(taskId: string): SyncTaskState | undefined {
+    return this.taskStates.get(taskId);
+  }
+
+  public getAllSyncTaskStatuses(): SyncTaskState[] {
+    return Array.from(this.taskStates.values());
+  }
+
+  public clearSyncTask(taskId: string): boolean {
+    return this.taskStates.delete(taskId);
+  }
+
+  public clearAllSyncTasks(): void {
+    this.taskStates.clear();
+  }
+
+  private createInitialTaskState(
+    syncType: 'usage_records' | 'change_notices',
+    options: SyncTaskOptions,
+    filters: Record<string, unknown>,
+    checkpoint?: SyncCheckpoint
+  ): SyncTaskState {
+    const taskId = options.taskId || generateTaskId();
+    const retryPolicy: RetryPolicy = {
+      ...DEFAULT_RETRY_POLICY,
+      ...options.retryPolicy
+    };
+
+    const state: SyncTaskState = {
+      taskId,
+      syncType,
+      status: 'idle',
+      startTime: new Date().toISOString(),
+      currentBatch: checkpoint?.batchCount || 0,
+      totalSynced: checkpoint?.totalSynced || 0,
+      lastCursor: checkpoint?.cursor || null,
+      lastSyncTime: checkpoint?.lastSyncTime || new Date().toISOString(),
+      hasMore: true,
+      filters,
+      retryPolicy,
+      statistics: {
+        totalBatches: checkpoint?.batchCount || 0,
+        successfulBatches: 0,
+        failedBatches: 0,
+        totalRetries: 0,
+        averageBatchTimeMs: 0
+      }
+    };
+
+    this.taskStates.set(taskId, state);
+    return state;
+  }
+
+  private updateTaskState(taskId: string, updates: Partial<SyncTaskState>): SyncTaskState {
+    const state = this.taskStates.get(taskId);
+    if (!state) {
+      throw new SDKError(ErrorCode.UNKNOWN_ERROR, `同步任务 ${taskId} 不存在`);
+    }
+
+    const updated: SyncTaskState = { ...state, ...updates };
+    this.taskStates.set(taskId, updated);
+    return updated;
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private calculateRetryDelay(retryCount: number, policy: RetryPolicy): number {
+    const delay = policy.initialDelayMs * Math.pow(policy.backoffMultiplier, retryCount);
+    return Math.min(delay, policy.maxDelayMs);
+  }
+
+  private isRetryableError(error: unknown, policy: RetryPolicy): boolean {
+    if (error instanceof SDKError) {
+      return policy.retryableErrorCodes?.includes(error.code) ?? true;
+    }
+    if (error instanceof Error) {
+      const msg = error.message.toLowerCase();
+      return (
+        msg.includes('timeout') ||
+        msg.includes('network') ||
+        msg.includes('econnrefused') ||
+        msg.includes('enotfound') ||
+        msg.includes('econnaborted') ||
+        msg.includes('service unavailable') ||
+        msg.includes('internal server error') ||
+        msg.includes('bad gateway')
+      );
+    }
+    return false;
+  }
+
+  private async executeWithRetry<T>(
+    operation: () => Promise<T>,
+    policy: RetryPolicy,
+    onRetry?: (retryCount: number, error: Error, delayMs: number) => void
+  ): Promise<T> {
+    let lastError: Error | null = null;
+    let retryCount = 0;
+
+    while (retryCount <= policy.maxRetries) {
+      try {
+        return await operation();
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        lastError = err;
+
+        if (retryCount >= policy.maxRetries || !this.isRetryableError(error, policy)) {
+          throw err;
+        }
+
+        const delay = this.calculateRetryDelay(retryCount, policy);
+        if (onRetry) {
+          onRetry(retryCount, err, delay);
+        }
+
+        await this.sleep(delay);
+        retryCount++;
+      }
+    }
+
+    throw lastError || new Error('未知错误');
   }
 
   public async getUsageRecords(params?: PaginationParams & {
@@ -1088,6 +1224,475 @@ export class UsageRecordModule {
         type: params.type,
         level: params.level
       }
+    };
+  }
+
+  public async syncUsageRecordsWithTask(
+    params: {
+      authorizationId?: string;
+      productId?: string;
+      status?: 'success' | 'failed';
+      lastSyncTime?: string;
+      batchSize?: number;
+      checkpoint?: SyncCheckpoint;
+      maxBatches?: number;
+      onBatch?: (
+        batch: UsageRecord[],
+        checkpoint: SyncCheckpoint,
+        hasMore: boolean
+      ) => void | Promise<void>;
+      onError?: (error: Error, checkpoint: SyncCheckpoint) => void | Promise<void>;
+    } & SyncTaskOptions
+  ): Promise<SyncWithTaskResult<UsageRecord>> {
+    const batchSize = params.batchSize || 100;
+    const maxBatches = params.maxBatches || Infinity;
+
+    const filters: Record<string, unknown> = {
+      productId: params.productId,
+      authorizationId: params.authorizationId,
+      status: params.status
+    };
+
+    const taskState = this.createInitialTaskState('usage_records', params, filters, params.checkpoint);
+    const taskId = taskState.taskId;
+    const policy = taskState.retryPolicy!;
+
+    this.updateTaskState(taskId, { status: 'running' });
+    if (params.onStateChange) {
+      await params.onStateChange(this.taskStates.get(taskId)!);
+    }
+
+    let cursor: string | undefined = params.checkpoint?.cursor || undefined;
+    let lastSyncTime: string | undefined = params.checkpoint?.lastSyncTime || params.lastSyncTime;
+    let totalSynced = taskState.totalSynced;
+    let batchCount = taskState.currentBatch;
+    let hasMore = true;
+    let lastResult: IncrementalResponse<UsageRecord> | null = null;
+    const batchTimes: number[] = [];
+
+    const createCheckpoint = (
+      currentCursor: string | null,
+      currentBatchCount: number,
+      currentTotal: number,
+      error?: { message: string; batchNumber: number }
+    ): SyncCheckpoint => ({
+      syncType: 'usage_records',
+      cursor: currentCursor,
+      lastSyncTime: lastSyncTime || new Date().toISOString(),
+      totalSynced: currentTotal,
+      batchCount: currentBatchCount,
+      lastBatchTime: new Date().toISOString(),
+      filters: params.checkpoint?.filters || filters,
+      error: error
+        ? {
+            ...error,
+            timestamp: new Date().toISOString()
+          }
+        : undefined
+    });
+
+    while (hasMore && batchCount < maxBatches) {
+      const batchStartTime = Date.now();
+      let retryCount = 0;
+
+      try {
+        const result = await this.executeWithRetry(
+          async () => {
+            this.updateTaskState(taskId, { status: retryCount > 0 ? 'retrying' : 'running' });
+            return await this.getUsageRecordsIncremental({
+              authorizationId: params.authorizationId,
+              productId: params.productId,
+              status: params.status,
+              cursor,
+              limit: batchSize,
+              lastSyncTime
+            });
+          },
+          policy,
+          (count, err, delay) => {
+            retryCount = count + 1;
+            this.updateTaskState(taskId, {
+              status: 'retrying',
+              lastError: {
+                message: err.message,
+                batchNumber: batchCount + 1,
+                timestamp: new Date().toISOString(),
+                retryCount
+              },
+              statistics: {
+                ...this.taskStates.get(taskId)!.statistics,
+                totalRetries: this.taskStates.get(taskId)!.statistics.totalRetries + 1
+              }
+            });
+            if (params.onStateChange) {
+              params.onStateChange(this.taskStates.get(taskId)!);
+            }
+          }
+        );
+
+        lastResult = result;
+        batchCount++;
+        totalSynced += result.list.length;
+
+        const batchTime = Date.now() - batchStartTime;
+        batchTimes.push(batchTime);
+        const avgBatchTime = batchTimes.reduce((a, b) => a + b, 0) / batchTimes.length;
+
+        const checkpoint = createCheckpoint(result.nextCursor, batchCount, totalSynced);
+
+        this.updateTaskState(taskId, {
+          currentBatch: batchCount,
+          totalSynced,
+          lastCursor: result.nextCursor,
+          lastSyncTime: new Date().toISOString(),
+          hasMore: result.hasMore,
+          lastError: undefined,
+          statistics: {
+            totalBatches: batchCount,
+            successfulBatches: this.taskStates.get(taskId)!.statistics.successfulBatches + 1,
+            failedBatches: this.taskStates.get(taskId)!.statistics.failedBatches,
+            totalRetries: this.taskStates.get(taskId)!.statistics.totalRetries,
+            averageBatchTimeMs: avgBatchTime
+          }
+        });
+
+        if (params.onStateChange) {
+          await params.onStateChange(this.taskStates.get(taskId)!);
+        }
+
+        if (params.onBatch) {
+          await params.onBatch(result.list, checkpoint, result.hasMore);
+        }
+
+        hasMore = result.hasMore;
+        cursor = result.nextCursor || undefined;
+
+        if (!hasMore) {
+          break;
+        }
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        const checkpoint = createCheckpoint(cursor || null, batchCount, totalSynced, {
+          message: err.message,
+          batchNumber: batchCount + 1
+        });
+
+        this.updateTaskState(taskId, {
+          status: 'failed',
+          endTime: new Date().toISOString(),
+          lastError: {
+            message: err.message,
+            batchNumber: batchCount + 1,
+            timestamp: new Date().toISOString(),
+            retryCount
+          },
+          hasMore: true,
+          statistics: {
+            ...this.taskStates.get(taskId)!.statistics,
+            failedBatches: this.taskStates.get(taskId)!.statistics.failedBatches + 1
+          }
+        });
+
+        if (params.onStateChange) {
+          await params.onStateChange(this.taskStates.get(taskId)!);
+        }
+
+        if (params.onError) {
+          await params.onError(err, checkpoint);
+        }
+
+        return {
+          list: lastResult?.list || [],
+          nextCursor: cursor || null,
+          hasMore: true,
+          total: lastResult?.total,
+          syncTime: new Date().toISOString(),
+          updatedCount: totalSynced,
+          deletedCount: 0,
+          checkpoint,
+          taskState: this.taskStates.get(taskId)!
+        };
+      }
+    }
+
+    const finalCheckpoint = createCheckpoint(cursor || null, batchCount, totalSynced);
+
+    this.updateTaskState(taskId, {
+      status: 'completed',
+      endTime: new Date().toISOString(),
+      hasMore,
+      lastCursor: cursor || null
+    });
+
+    if (params.onStateChange) {
+      await params.onStateChange(this.taskStates.get(taskId)!);
+    }
+
+    return {
+      list: lastResult?.list || [],
+      nextCursor: cursor || null,
+      hasMore,
+      total: lastResult?.total,
+      syncTime: new Date().toISOString(),
+      updatedCount: totalSynced,
+      deletedCount: 0,
+      checkpoint: finalCheckpoint,
+      taskState: this.taskStates.get(taskId)!
+    };
+  }
+
+  public async syncChangeNoticesWithTask(
+    params: {
+      productId?: string;
+      type?: ChangeNotice['type'];
+      level?: ChangeNotice['level'];
+      lastSyncTime?: string;
+      batchSize?: number;
+      checkpoint?: SyncCheckpoint;
+      maxBatches?: number;
+      invalidateCache?: boolean;
+      onBatch?: (
+        batch: ChangeNotice[],
+        checkpoint: SyncCheckpoint,
+        hasMore: boolean
+      ) => void | Promise<void>;
+      onError?: (error: Error, checkpoint: SyncCheckpoint) => void | Promise<void>;
+    } & SyncTaskOptions
+  ): Promise<SyncWithTaskResult<ChangeNotice>> {
+    const batchSize = params.batchSize || 100;
+    const maxBatches = params.maxBatches || Infinity;
+    const invalidateCache = params.invalidateCache !== false;
+
+    const filters: Record<string, unknown> = {
+      productId: params.productId,
+      type: params.type,
+      level: params.level
+    };
+
+    const taskState = this.createInitialTaskState('change_notices', params, filters, params.checkpoint);
+    const taskId = taskState.taskId;
+    const policy = taskState.retryPolicy!;
+
+    this.updateTaskState(taskId, { status: 'running' });
+    if (params.onStateChange) {
+      await params.onStateChange(this.taskStates.get(taskId)!);
+    }
+
+    let cursor: string | undefined = params.checkpoint?.cursor || undefined;
+    let lastSyncTime: string | undefined = params.checkpoint?.lastSyncTime || params.lastSyncTime;
+    let totalSynced = taskState.totalSynced;
+    let batchCount = taskState.currentBatch;
+    let hasMore = true;
+    let lastResult: IncrementalResponse<ChangeNotice> | null = null;
+    const batchTimes: number[] = [];
+    const allAffectedProductIds = new Set<string>();
+
+    const createCheckpoint = (
+      currentCursor: string | null,
+      currentBatchCount: number,
+      currentTotal: number,
+      error?: { message: string; batchNumber: number }
+    ): SyncCheckpoint => ({
+      syncType: 'change_notices',
+      cursor: currentCursor,
+      lastSyncTime: lastSyncTime || new Date().toISOString(),
+      totalSynced: currentTotal,
+      batchCount: currentBatchCount,
+      lastBatchTime: new Date().toISOString(),
+      filters: params.checkpoint?.filters || filters,
+      error: error
+        ? {
+            ...error,
+            timestamp: new Date().toISOString()
+          }
+        : undefined
+    });
+
+    const filterNotices = (notices: ChangeNotice[]): ChangeNotice[] => {
+      return notices.filter((notice) => {
+        if (params.productId && notice.productId !== params.productId) {
+          return false;
+        }
+        if (params.type && notice.type !== params.type) {
+          return false;
+        }
+        if (params.level && notice.level !== params.level) {
+          return false;
+        }
+        return true;
+      });
+    };
+
+    const invalidateAffectedCache = (productIds: Set<string>) => {
+      if (!invalidateCache || !this.client.isCacheEnabled()) return;
+
+      let affectedIds = productIds;
+      if (params.productId) {
+        affectedIds = new Set(Array.from(affectedIds).filter((id) => id === params.productId));
+      }
+
+      for (const productId of affectedIds) {
+        this.client.invalidateCacheByProductId(productId);
+      }
+    };
+
+    while (hasMore && batchCount < maxBatches) {
+      const batchStartTime = Date.now();
+      let retryCount = 0;
+
+      try {
+        const result = await this.executeWithRetry(
+          async () => {
+            this.updateTaskState(taskId, { status: retryCount > 0 ? 'retrying' : 'running' });
+            return await this.getChangeNoticesIncremental({
+              productId: params.productId,
+              type: params.type,
+              level: params.level,
+              cursor,
+              limit: batchSize,
+              lastSyncTime
+            });
+          },
+          policy,
+          (count, err, delay) => {
+            retryCount = count + 1;
+            this.updateTaskState(taskId, {
+              status: 'retrying',
+              lastError: {
+                message: err.message,
+                batchNumber: batchCount + 1,
+                timestamp: new Date().toISOString(),
+                retryCount
+              },
+              statistics: {
+                ...this.taskStates.get(taskId)!.statistics,
+                totalRetries: this.taskStates.get(taskId)!.statistics.totalRetries + 1
+              }
+            });
+            if (params.onStateChange) {
+              params.onStateChange(this.taskStates.get(taskId)!);
+            }
+          }
+        );
+
+        const filteredList = filterNotices(result.list);
+        lastResult = { ...result, list: filteredList };
+
+        batchCount++;
+        totalSynced += filteredList.length;
+
+        if (invalidateCache) {
+          filteredList.forEach((n) => allAffectedProductIds.add(n.productId));
+        }
+
+        const batchTime = Date.now() - batchStartTime;
+        batchTimes.push(batchTime);
+        const avgBatchTime = batchTimes.reduce((a, b) => a + b, 0) / batchTimes.length;
+
+        const checkpoint = createCheckpoint(result.nextCursor, batchCount, totalSynced);
+
+        this.updateTaskState(taskId, {
+          currentBatch: batchCount,
+          totalSynced,
+          lastCursor: result.nextCursor,
+          lastSyncTime: new Date().toISOString(),
+          hasMore: result.hasMore,
+          lastError: undefined,
+          statistics: {
+            totalBatches: batchCount,
+            successfulBatches: this.taskStates.get(taskId)!.statistics.successfulBatches + 1,
+            failedBatches: this.taskStates.get(taskId)!.statistics.failedBatches,
+            totalRetries: this.taskStates.get(taskId)!.statistics.totalRetries,
+            averageBatchTimeMs: avgBatchTime
+          }
+        });
+
+        if (params.onStateChange) {
+          await params.onStateChange(this.taskStates.get(taskId)!);
+        }
+
+        if (params.onBatch) {
+          await params.onBatch(filteredList, checkpoint, result.hasMore);
+        }
+
+        hasMore = result.hasMore;
+        cursor = result.nextCursor || undefined;
+
+        if (!hasMore) {
+          break;
+        }
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        const checkpoint = createCheckpoint(cursor || null, batchCount, totalSynced, {
+          message: err.message,
+          batchNumber: batchCount + 1
+        });
+
+        invalidateAffectedCache(allAffectedProductIds);
+
+        this.updateTaskState(taskId, {
+          status: 'failed',
+          endTime: new Date().toISOString(),
+          lastError: {
+            message: err.message,
+            batchNumber: batchCount + 1,
+            timestamp: new Date().toISOString(),
+            retryCount
+          },
+          hasMore: true,
+          statistics: {
+            ...this.taskStates.get(taskId)!.statistics,
+            failedBatches: this.taskStates.get(taskId)!.statistics.failedBatches + 1
+          }
+        });
+
+        if (params.onStateChange) {
+          await params.onStateChange(this.taskStates.get(taskId)!);
+        }
+
+        if (params.onError) {
+          await params.onError(err, checkpoint);
+        }
+
+        return {
+          list: lastResult?.list || [],
+          nextCursor: cursor || null,
+          hasMore: true,
+          total: lastResult?.total,
+          syncTime: new Date().toISOString(),
+          updatedCount: totalSynced,
+          deletedCount: 0,
+          checkpoint,
+          taskState: this.taskStates.get(taskId)!
+        };
+      }
+    }
+
+    invalidateAffectedCache(allAffectedProductIds);
+
+    const finalCheckpoint = createCheckpoint(cursor || null, batchCount, totalSynced);
+
+    this.updateTaskState(taskId, {
+      status: 'completed',
+      endTime: new Date().toISOString(),
+      hasMore,
+      lastCursor: cursor || null
+    });
+
+    if (params.onStateChange) {
+      await params.onStateChange(this.taskStates.get(taskId)!);
+    }
+
+    return {
+      list: lastResult?.list || [],
+      nextCursor: cursor || null,
+      hasMore,
+      total: lastResult?.total,
+      syncTime: new Date().toISOString(),
+      updatedCount: totalSynced,
+      deletedCount: 0,
+      checkpoint: finalCheckpoint,
+      taskState: this.taskStates.get(taskId)!
     };
   }
 

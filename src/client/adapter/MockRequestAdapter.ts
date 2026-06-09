@@ -195,7 +195,7 @@ export class MockRequestAdapter implements IRequestAdapter {
     params: Record<string, unknown> | undefined,
     stateMap: Map<string, CursorState>,
     totalRecords: number,
-    generator: () => T
+    generator: (index: number) => T
   ): CursorResponse<T> {
     const limit = (params?.limit as number) || 20;
     const cursor = params?.cursor as string | undefined;
@@ -209,7 +209,7 @@ export class MockRequestAdapter implements IRequestAdapter {
     const remaining = state.total - offset;
     const fetchCount = Math.min(actualLimit, remaining);
 
-    const list = Array.from({ length: fetchCount }, () => generator());
+    const list = Array.from({ length: fetchCount }, (_, i) => generator(i));
 
     const newOffset = offset + fetchCount;
     state.offset = newOffset;
@@ -229,7 +229,7 @@ export class MockRequestAdapter implements IRequestAdapter {
     params: Record<string, unknown> | undefined,
     stateMap: Map<string, CursorState>,
     totalRecords: number,
-    generator: () => T
+    generator: (index: number) => T
   ): IncrementalResponse<T> {
     const cursorResponse = this.generateCursorResponse(params, stateMap, totalRecords, generator);
     const syncTime = dayjs().toISOString();
@@ -610,8 +610,34 @@ export class MockRequestAdapter implements IRequestAdapter {
 
     if (url.match(/\/authorization\/[^/]+$/) && !url.includes('/scope') && !url.includes('/audit-progress')) {
       const authId = this.extractProductId(url);
+
+      if (authId?.includes('network-error') || authId?.includes('network_error')) {
+        throw new Error('network error: ECONNREFUSED 127.0.0.1:8080');
+      }
+      if (authId?.includes('timeout')) {
+        throw new Error('timeout of 30000ms exceeded');
+      }
+      if (authId?.includes('platform-error') || authId?.includes('platform_error')) {
+        return this.generateErrorResponse(
+          ErrorCode.INTERNAL_ERROR,
+          '平台内部错误，请稍后重试'
+        ) as ApiResponse<T>;
+      }
+      if (authId?.includes('not-found') || authId?.includes('not_found')) {
+        return this.generateErrorResponse(
+          ErrorCode.RESOURCE_NOT_FOUND,
+          `授权 ${authId} 不存在`
+        ) as ApiResponse<T>;
+      }
+      if (authId?.includes('param-error') || authId?.includes('param_error')) {
+        return this.generateErrorResponse(
+          ErrorCode.PARAM_INVALID,
+          '授权ID格式不正确'
+        ) as ApiResponse<T>;
+      }
+
       return this.generateSuccessResponse(
-        mockDataGenerator.generateAuthorization()
+        mockDataGenerator.generateAuthorization(undefined, authId)
       ) as ApiResponse<T>;
     }
 
@@ -698,7 +724,7 @@ export class MockRequestAdapter implements IRequestAdapter {
           params,
           this.usageRecordCursorStates,
           this.TOTAL_RECORDS,
-          () => mockDataGenerator.generateUsageRecord()
+          (_i) => mockDataGenerator.generateUsageRecord()
         )
       ) as ApiResponse<T>;
     }
@@ -716,7 +742,7 @@ export class MockRequestAdapter implements IRequestAdapter {
           params,
           this.usageRecordCursorStates,
           this.TOTAL_RECORDS,
-          () => mockDataGenerator.generateUsageRecord()
+          (_i) => mockDataGenerator.generateUsageRecord()
         )
       ) as ApiResponse<T>;
     }
@@ -753,12 +779,17 @@ export class MockRequestAdapter implements IRequestAdapter {
           `缺少必填参数: ${missing.join(', ')}`
         ) as ApiResponse<T>;
       }
+
+      const productId = params?.productId as string | undefined;
+      const type = params?.type as ChangeNotice['type'] | undefined;
+      const level = params?.level as ChangeNotice['level'] | undefined;
+
       return this.generateSuccessResponse(
         this.generateCursorResponse<ChangeNotice>(
           params,
           this.changeNoticeCursorStates,
           this.TOTAL_NOTICES,
-          () => mockDataGenerator.generateChangeNotice()
+          (_i) => mockDataGenerator.generateChangeNotice(productId, { type, level })
         )
       ) as ApiResponse<T>;
     }
@@ -771,23 +802,32 @@ export class MockRequestAdapter implements IRequestAdapter {
           `缺少必填参数: ${missing.join(', ')}`
         ) as ApiResponse<T>;
       }
+
+      const productId = params?.productId as string | undefined;
+      const type = params?.type as ChangeNotice['type'] | undefined;
+      const level = params?.level as ChangeNotice['level'] | undefined;
+
       return this.generateSuccessResponse(
         this.generateIncrementalResponse<ChangeNotice>(
           params,
           this.changeNoticeCursorStates,
           this.TOTAL_NOTICES,
-          () => mockDataGenerator.generateChangeNotice()
+          (_i) => mockDataGenerator.generateChangeNotice(productId, { type, level })
         )
       ) as ApiResponse<T>;
     }
 
     if (url.includes('/usage/notices') && method === 'GET') {
       const count = Math.floor(Math.random() * 10) + 1;
+      const productId = params?.productId as string | undefined;
+      const type = params?.type as ChangeNotice['type'] | undefined;
+      const level = params?.level as ChangeNotice['level'] | undefined;
+
       return this.generateSuccessResponse({
         total: count,
         page: 1,
         pageSize: 20,
-        list: Array.from({ length: count }, () => mockDataGenerator.generateChangeNotice()),
+        list: Array.from({ length: count }, () => mockDataGenerator.generateChangeNotice(productId, { type, level })),
         unreadCount: Math.floor(Math.random() * count)
       }) as ApiResponse<T>;
     }

@@ -456,4 +456,64 @@ export interface DetailedBatchResponse<T> {
   results: DetailedBatchResult<T>[];
 }
 
+export type SyncTaskStatus = 'idle' | 'running' | 'paused' | 'completed' | 'failed' | 'retrying';
+
+export interface SyncTaskState {
+  taskId: string;
+  syncType: 'usage_records' | 'change_notices';
+  status: SyncTaskStatus;
+  startTime: string;
+  endTime?: string;
+  currentBatch: number;
+  totalSynced: number;
+  lastCursor: string | null;
+  lastSyncTime: string;
+  lastError?: {
+    message: string;
+    batchNumber: number;
+    timestamp: string;
+    retryCount: number;
+  };
+  hasMore: boolean;
+  filters?: Record<string, unknown>;
+  retryPolicy?: RetryPolicy;
+  statistics: {
+    totalBatches: number;
+    successfulBatches: number;
+    failedBatches: number;
+    totalRetries: number;
+    averageBatchTimeMs: number;
+  };
+}
+
+export interface RetryPolicy {
+  maxRetries: number;
+  initialDelayMs: number;
+  maxDelayMs: number;
+  backoffMultiplier: number;
+  retryableErrorCodes?: number[];
+}
+
+export interface SyncTaskOptions {
+  taskId?: string;
+  retryPolicy?: Partial<RetryPolicy>;
+  onStateChange?: (state: SyncTaskState) => void | Promise<void>;
+}
+
+export interface SyncWithTaskResult<T> extends SyncResultWithCheckpoint<T> {
+  taskState: SyncTaskState;
+}
+
+export const DEFAULT_RETRY_POLICY: RetryPolicy = {
+  maxRetries: 3,
+  initialDelayMs: 1000,
+  maxDelayMs: 10000,
+  backoffMultiplier: 2,
+  retryableErrorCodes: [
+    500, 502, 503, 504,
+    408, 429,
+    1001, 1002, 1003
+  ]
+};
+
 export * from '../errors';

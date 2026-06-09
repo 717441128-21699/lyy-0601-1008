@@ -274,19 +274,54 @@ export class MockDataGenerator {
     };
   }
 
-  generateAuthorization(productId?: string): Authorization {
-    const validFrom = dayjs().subtract(this.randomInt(0, 30), 'day');
-    const validTo = validFrom.add(this.randomInt(30, 365), 'day');
+  generateAuthorization(productId?: string, authId?: string): Authorization {
+    let id = authId || this.generateId('auth');
+    let status: Authorization['status'] = 'active';
+    let callLimit = this.randomInt(1000, 100000);
+    let callCount = this.randomInt(0, 500);
+    let validFrom = dayjs().subtract(this.randomInt(0, 30), 'day');
+    let validTo = validFrom.add(this.randomInt(30, 365), 'day');
+    let productName = '企业信用信息数据集';
+
+    if (id.includes('expired')) {
+      status = 'expired';
+      validTo = dayjs().subtract(1, 'day');
+      productName = '已过期授权-测试数据集';
+    } else if (id.includes('suspended')) {
+      status = 'suspended';
+      productName = '已暂停授权-测试数据集';
+    } else if (id.includes('calls-exhausted') || id.includes('calls_exhausted')) {
+      callLimit = 100;
+      callCount = 100;
+      productName = '次数用尽授权-测试数据集';
+    } else if (id.includes('revoked')) {
+      status = 'revoked';
+      productName = '已撤销授权-测试数据集';
+    } else if (id.includes('pending')) {
+      status = 'pending';
+      productName = '待审核授权-测试数据集';
+    } else if (id.includes('rejected')) {
+      status = 'rejected';
+      productName = '已拒绝授权-测试数据集';
+    } else if (id.includes('cancelled')) {
+      status = 'cancelled';
+      productName = '已取消授权-测试数据集';
+    } else if (id.includes('valid')) {
+      status = 'active';
+      callLimit = 10000;
+      callCount = 500;
+      productName = '有效授权-测试数据集';
+    }
 
     return {
-      id: this.generateId('auth'),
+      id,
       applyId: this.generateId('apply'),
       productId: productId || this.generateId('prod'),
-      productName: '企业信用信息数据集',
-      status: this.randomFromArray(['active', 'active', 'active', 'expired', 'suspended'] as const),
+      productName,
+      status,
       scope: {
-        callLimit: this.randomInt(1000, 100000),
-        callCount: this.randomInt(0, 5000),
+        callLimit,
+        callCount,
         ipWhitelist: this.randomBoolean() ? ['192.168.1.1', '10.0.0.0/24'] : undefined,
         dataRange: this.randomBoolean() ? ['北京', '上海', '广东'] : undefined
       },
@@ -374,10 +409,18 @@ export class MockDataGenerator {
     };
   }
 
-  generateChangeNotice(productId?: string): ChangeNotice {
+  generateChangeNotice(
+    productId?: string,
+    filters?: {
+      type?: ChangeNotice['type'];
+      level?: ChangeNotice['level'];
+    }
+  ): ChangeNotice {
     const types: ChangeNotice['type'][] = ['update', 'deprecation', 'price_change', 'policy_change', 'maintenance'];
     const levels: ChangeNotice['level'][] = ['info', 'warning', 'critical'];
-    const type = this.randomFromArray(types);
+
+    const type = filters?.type || this.randomFromArray(types);
+    const level = filters?.level || this.randomFromArray(levels);
 
     const titles: Record<ChangeNotice['type'], string[]> = {
       update: ['功能优化更新', '新增数据字段', '接口版本升级'],
@@ -387,14 +430,23 @@ export class MockDataGenerator {
       maintenance: ['系统维护通知', '服务升级公告', '数据同步暂停通知']
     };
 
+    const productNames: Record<string, string> = {
+      'product-001': '全国企业信用信息数据集',
+      'product-002': '政务服务办理数据',
+      'product-003': '宏观经济统计数据库'
+    };
+
+    const noticeProductId = productId || this.generateId('prod');
+    const productName = productNames[noticeProductId] || '企业信用信息数据集';
+
     return {
       id: this.generateId('notice'),
-      productId: productId || this.generateId('prod'),
-      productName: '企业信用信息数据集',
+      productId: noticeProductId,
+      productName,
       type,
       title: this.randomFromArray(titles[type]),
       content: `这是关于${this.randomFromArray(titles[type])}的详细说明内容。请相关用户注意调整业务逻辑。`,
-      level: this.randomFromArray(levels),
+      level,
       publishTime: dayjs().subtract(this.randomInt(0, 7), 'day').toISOString(),
       effectiveTime: dayjs().add(this.randomInt(1, 30), 'day').toISOString()
     };
