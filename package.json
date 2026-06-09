@@ -1,0 +1,29 @@
+{
+  "name": "data-catalog-sdk",
+  "version": "1.0.0",
+  "description": "数据要素目录查询 SDK - 提供统一的数据资源检索能力",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "jest",
+    "lint": "eslint src/**/*.ts"
+  },
+  "keywords": [
+    "data-catalog",
+    "data-exchange",
+    "sdk",
+    "data-resources"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dayjs": "^1.11.10"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.2.2"
+  }
+}
