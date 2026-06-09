@@ -6,7 +6,12 @@ import {
   AuditRecord,
   AuditStatus,
   PaginationParams,
-  BatchResponse
+  BatchResponse,
+  AuthorizationCheckResult,
+  AuthorizationInvalidReason,
+  DetailedBatchResponse,
+  DetailedBatchResult,
+  BatchQueryStatus
 } from '../types';
 import {
   validateRequiredParams,
@@ -175,41 +180,46 @@ export class AuthorizationStatus {
     return result;
   }
 
-  public async checkAuthorizationValid(authorizationId: string): Promise<{
-    valid: boolean;
-    reason?: string;
-    authorization?: Authorization;
-  }> {
+  public async checkAuthorizationValid(authorizationId: string): Promise<AuthorizationCheckResult> {
     validateRequiredParams({ authorizationId }, ['authorizationId']);
 
     const auth = await this.getAuthorizationDetail(authorizationId);
 
-    if (auth.status !== 'active') {
-      return {
-        valid: false,
-        reason: `授权状态为 ${auth.status}，不可用`,
-        authorization: auth
-      };
-    }
+    let reason: AuthorizationInvalidReason | undefined;
+    let reasonMessage: string | undefined;
 
-    if (dayjs(auth.validTo).isBefore(dayjs())) {
-      return {
-        valid: false,
-        reason: '授权已过期',
-        authorization: auth
-      };
-    }
+    const status = auth.status as string;
 
-    if (auth.scope.callCount >= auth.scope.callLimit) {
-      return {
-        valid: false,
-        reason: '调用次数已用尽',
-        authorization: auth
-      };
+    if (status === 'expired' || dayjs(auth.validTo).isBefore(dayjs())) {
+      reason = 'expired';
+      reasonMessage = '授权已过期';
+    } else if (auth.scope.callCount >= auth.scope.callLimit) {
+      reason = 'calls_exhausted';
+      reasonMessage = '调用次数已用尽';
+    } else if (status === 'suspended') {
+      reason = 'status_suspended';
+      reasonMessage = '授权已暂停';
+    } else if (status === 'revoked') {
+      reason = 'status_revoked';
+      reasonMessage = '授权已撤销';
+    } else if (status === 'pending') {
+      reason = 'status_pending';
+      reasonMessage = '授权待审核';
+    } else if (status === 'rejected') {
+      reason = 'status_rejected';
+      reasonMessage = '授权已拒绝';
+    } else if (status === 'cancelled') {
+      reason = 'status_cancelled';
+      reasonMessage = '授权已取消';
+    } else if (status !== 'active') {
+      reason = 'unknown';
+      reasonMessage = `授权状态为 ${status}，不可用`;
     }
 
     return {
-      valid: true,
+      valid: reason === undefined,
+      reason,
+      reasonMessage,
       authorization: auth
     };
   }
@@ -372,16 +382,77 @@ export class AuthorizationStatus {
     return dayjs(validTo).isBefore(dayjs());
   }
 
+  private classifyError(error: unknown): {
+    status: BatchQueryStatus;
+    code: number;
+    message: string;
+    traceId?: string;
+  } {
+    let status: BatchQueryStatus = 'unknown_error';
+    let code = ErrorCode.UNKNOWN_ERROR;
+    let message = '未知错误';
+    let traceId: string | undefined;
+
+    if (error instanceof SDKError) {
+      code = error.code;
+      message = error.message;
+      traceId = error.traceId;
+
+      switch (error.code) {
+        case ErrorCode.PARAM_MISSING:
+        case ErrorCode.PARAM_INVALID:
+        case ErrorCode.MATERIAL_MISSING:
+        case ErrorCode.MATERIAL_INVALID:
+          status = 'invalid_request';
+          break;
+        case ErrorCode.RESOURCE_NOT_FOUND:
+          status = 'platform_error';
+          break;
+        case ErrorCode.UNAUTHORIZED:
+        case ErrorCode.TOKEN_EXPIRED:
+        case ErrorCode.NO_PERMISSION:
+          status = 'platform_error';
+          break;
+        case ErrorCode.RATE_LIMIT_EXCEEDED:
+        case ErrorCode.SERVICE_UNAVAILABLE:
+        case ErrorCode.INTERNAL_ERROR:
+          status = 'platform_error';
+          break;
+        default:
+          status = 'platform_error';
+      }
+    } else if (error instanceof Error) {
+      message = error.message;
+
+      if (
+        error.message.includes('timeout') ||
+        error.message.includes('TIMEOUT') ||
+        error.message.includes('ETIMEDOUT')
+      ) {
+        status = 'timeout';
+        code = ErrorCode.UNKNOWN_ERROR;
+      } else if (
+        error.message.includes('network') ||
+        error.message.includes('ECONNREFUSED') ||
+        error.message.includes('ENOTFOUND') ||
+        error.message.includes('ECONNABORTED')
+      ) {
+        status = 'network_error';
+        code = ErrorCode.SERVICE_UNAVAILABLE;
+      } else {
+        status = 'unknown_error';
+      }
+    }
+
+    return { status, code, message, traceId };
+  }
+
   public async batchCheckAuthorizationValid(
     authorizationIds: string[],
     options?: {
       concurrency?: number;
     }
-  ): Promise<BatchResponse<{
-    valid: boolean;
-    reason?: string;
-    authorization?: Authorization;
-  }>> {
+  ): Promise<DetailedBatchResponse<AuthorizationCheckResult>> {
     if (!authorizationIds || authorizationIds.length === 0) {
       throw new SDKError(ErrorCode.PARAM_MISSING, 'authorizationIds 不能为空');
     }
@@ -389,13 +460,29 @@ export class AuthorizationStatus {
     validateParamRange('authorizationIds.length', authorizationIds.length, 1, 100);
 
     const concurrency = options?.concurrency || 10;
-    const results: BatchResponse<{
-      valid: boolean;
-      reason?: string;
-      authorization?: Authorization;
-    }>['results'] = [];
-    let successCount = 0;
-    let failedCount = 0;
+    const results: DetailedBatchResult<AuthorizationCheckResult>[] = [];
+
+    const summary: DetailedBatchResponse<AuthorizationCheckResult>['summary'] = {
+      success: 0,
+      networkError: 0,
+      platformError: 0,
+      invalidRequest: 0,
+      timeout: 0,
+      unknownError: 0
+    };
+
+    const authSummary: Required<DetailedBatchResponse<AuthorizationCheckResult>['authorizationSummary']> = {
+      valid: 0,
+      expired: 0,
+      callsExhausted: 0,
+      suspended: 0,
+      revoked: 0,
+      pending: 0,
+      rejected: 0,
+      cancelled: 0,
+      notFound: 0,
+      unknown: 0
+    };
 
     for (let i = 0; i < authorizationIds.length; i += concurrency) {
       const batch = authorizationIds.slice(i, i + concurrency);
@@ -405,36 +492,76 @@ export class AuthorizationStatus {
 
           const data = await this.checkAuthorizationValid(authorizationId);
 
-          successCount++;
-          return {
-            id: authorizationId,
-            success: true as const,
-            data,
-            error: undefined
-          };
-        } catch (error) {
-          failedCount++;
-          let errorInfo = {
-            code: ErrorCode.UNKNOWN_ERROR,
-            message: '未知错误',
-            traceId: ''
-          };
+          summary.success++;
 
-          if (error instanceof SDKError) {
-            errorInfo = {
-              code: error.code,
-              message: error.message,
-              traceId: error.traceId
-            };
-          } else if (error instanceof Error) {
-            errorInfo.message = error.message;
+          if (data.valid) {
+            authSummary.valid++;
+          } else if (data.reason) {
+            switch (data.reason) {
+              case 'expired':
+                authSummary.expired++;
+                break;
+              case 'calls_exhausted':
+                authSummary.callsExhausted++;
+                break;
+              case 'status_suspended':
+                authSummary.suspended++;
+                break;
+              case 'status_revoked':
+                authSummary.revoked++;
+                break;
+              case 'status_pending':
+                authSummary.pending++;
+                break;
+              case 'status_rejected':
+                authSummary.rejected++;
+                break;
+              case 'status_cancelled':
+                authSummary.cancelled++;
+                break;
+              case 'not_found':
+                authSummary.notFound++;
+                break;
+              default:
+                authSummary.unknown++;
+            }
           }
 
           return {
             id: authorizationId,
-            success: false as const,
+            status: 'success' as const,
+            data,
+            error: undefined
+          };
+        } catch (error) {
+          const errorInfo = this.classifyError(error);
+
+          switch (errorInfo.status) {
+            case 'network_error':
+              summary.networkError++;
+              break;
+            case 'platform_error':
+              summary.platformError++;
+              break;
+            case 'invalid_request':
+              summary.invalidRequest++;
+              break;
+            case 'timeout':
+              summary.timeout++;
+              break;
+            default:
+              summary.unknownError++;
+          }
+
+          return {
+            id: authorizationId,
+            status: errorInfo.status,
             data: null,
-            error: errorInfo
+            error: {
+              code: errorInfo.code,
+              message: errorInfo.message,
+              traceId: errorInfo.traceId
+            }
           };
         }
       });
@@ -443,10 +570,15 @@ export class AuthorizationStatus {
       results.push(...batchResults);
     }
 
+    const successCount = summary.success;
+    const failedCount = authorizationIds.length - successCount;
+
     return {
       total: authorizationIds.length,
       successCount,
       failedCount,
+      summary,
+      authorizationSummary: authSummary,
       results
     };
   }

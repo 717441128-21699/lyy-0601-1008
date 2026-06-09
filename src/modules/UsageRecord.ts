@@ -9,7 +9,9 @@ import {
   CursorPaginationParams,
   CursorResponse,
   IncrementalPullParams,
-  IncrementalResponse
+  IncrementalResponse,
+  SyncCheckpoint,
+  SyncResultWithCheckpoint
 } from '../types';
 import {
   validateRequiredParams,
@@ -580,10 +582,36 @@ export class UsageRecordModule {
       queryParams
     );
 
-    if (this.client.isCacheEnabled()) {
-      const affectedProductIds = new Set(result.list.map((n) => n.productId));
+    if (this.client.isCacheEnabled() && result.list.length > 0) {
+      let affectedProductIds = new Set(result.list.map((n) => n.productId));
+
+      if (params?.productId) {
+        affectedProductIds = new Set(
+          Array.from(affectedProductIds).filter((id) => id === params.productId)
+        );
+      }
+
+      if (params?.type) {
+        affectedProductIds = new Set(
+          result.list
+            .filter((n) => n.type === params.type)
+            .map((n) => n.productId)
+        );
+      }
+
+      if (params?.level) {
+        affectedProductIds = new Set(
+          result.list
+            .filter((n) => n.level === params.level)
+            .map((n) => n.productId)
+        );
+      }
+
       for (const productId of affectedProductIds) {
-        this.client.invalidateCacheByProductId(productId);
+        const cleared = this.client.invalidateCacheByProductId(productId);
+        if (this.client.getAxiosInstance()) {
+          console.debug(`[SDK Cache] Invalidated ${cleared} entries for product ${productId}`);
+        }
       }
     }
 
@@ -695,6 +723,371 @@ export class UsageRecordModule {
       batches,
       lastCursor: cursor || null,
       syncTime: new Date().toISOString()
+    };
+  }
+
+  public async syncUsageRecordsWithCheckpoint(
+    params: {
+      authorizationId?: string;
+      productId?: string;
+      status?: 'success' | 'failed';
+      lastSyncTime?: string;
+      batchSize?: number;
+      checkpoint?: SyncCheckpoint;
+      maxBatches?: number;
+      onBatch?: (
+        batch: UsageRecord[],
+        checkpoint: SyncCheckpoint,
+        hasMore: boolean
+      ) => void | Promise<void>;
+      onError?: (error: Error, checkpoint: SyncCheckpoint) => void | Promise<void>;
+    }
+  ): Promise<SyncResultWithCheckpoint<UsageRecord>> {
+    let cursor: string | undefined;
+    let lastSyncTime: string | undefined;
+    let totalSynced = 0;
+    let batchCount = 0;
+    const batchSize = params.batchSize || 100;
+    const maxBatches = params.maxBatches || Infinity;
+
+    const filters: SyncCheckpoint['filters'] = {
+      productId: params.productId,
+      authorizationId: params.authorizationId,
+      status: params.status
+    };
+
+    if (params.checkpoint) {
+      if (params.checkpoint.syncType !== 'usage_records') {
+        throw new ParameterInvalidError(
+          'checkpoint',
+          `检查点类型不匹配，期望 usage_records，实际 ${params.checkpoint.syncType}`
+        );
+      }
+      cursor = params.checkpoint.cursor || undefined;
+      lastSyncTime = params.checkpoint.lastSyncTime;
+      totalSynced = params.checkpoint.totalSynced || 0;
+      batchCount = params.checkpoint.batchCount || 0;
+    } else {
+      lastSyncTime = params.lastSyncTime;
+    }
+
+    const createCheckpoint = (
+      currentCursor: string | null,
+      currentBatchCount: number,
+      currentTotal: number,
+      error?: { message: string; batchNumber: number }
+    ): SyncCheckpoint => ({
+      syncType: 'usage_records',
+      cursor: currentCursor,
+      lastSyncTime: lastSyncTime || new Date().toISOString(),
+      totalSynced: currentTotal,
+      batchCount: currentBatchCount,
+      lastBatchTime: new Date().toISOString(),
+      filters,
+      error: error
+        ? {
+            ...error,
+            timestamp: new Date().toISOString()
+          }
+        : undefined
+    });
+
+    let hasMore = true;
+    let lastResult: IncrementalResponse<UsageRecord> | null = null;
+
+    while (hasMore && batchCount < maxBatches) {
+      try {
+        const result = await this.getUsageRecordsIncremental({
+          authorizationId: params.authorizationId,
+          productId: params.productId,
+          status: params.status,
+          cursor,
+          limit: batchSize,
+          lastSyncTime
+        });
+
+        lastResult = result;
+        batchCount++;
+        totalSynced += result.list.length;
+
+        const checkpoint = createCheckpoint(
+          result.nextCursor,
+          batchCount,
+          totalSynced
+        );
+
+        if (params.onBatch) {
+          await params.onBatch(result.list, checkpoint, result.hasMore);
+        }
+
+        hasMore = result.hasMore;
+        cursor = result.nextCursor || undefined;
+
+        if (!hasMore) {
+          break;
+        }
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        const checkpoint = createCheckpoint(
+          cursor || null,
+          batchCount,
+          totalSynced,
+          {
+            message: err.message,
+            batchNumber: batchCount
+          }
+        );
+
+        if (params.onError) {
+          await params.onError(err, checkpoint);
+        }
+
+        return {
+          list: lastResult?.list || [],
+          nextCursor: cursor || null,
+          hasMore: true,
+          total: lastResult?.total,
+          syncTime: new Date().toISOString(),
+          updatedCount: totalSynced,
+          deletedCount: 0,
+          checkpoint
+        };
+      }
+    }
+
+    const finalCheckpoint = createCheckpoint(
+      cursor || null,
+      batchCount,
+      totalSynced
+    );
+
+    return {
+      list: lastResult?.list || [],
+      nextCursor: cursor || null,
+      hasMore,
+      total: lastResult?.total,
+      syncTime: new Date().toISOString(),
+      updatedCount: totalSynced,
+      deletedCount: 0,
+      checkpoint: finalCheckpoint
+    };
+  }
+
+  public async syncChangeNoticesWithCheckpoint(
+    params: {
+      productId?: string;
+      type?: ChangeNotice['type'];
+      level?: ChangeNotice['level'];
+      lastSyncTime?: string;
+      batchSize?: number;
+      checkpoint?: SyncCheckpoint;
+      maxBatches?: number;
+      invalidateCache?: boolean;
+      onBatch?: (
+        batch: ChangeNotice[],
+        checkpoint: SyncCheckpoint,
+        hasMore: boolean
+      ) => void | Promise<void>;
+      onError?: (error: Error, checkpoint: SyncCheckpoint) => void | Promise<void>;
+    }
+  ): Promise<SyncResultWithCheckpoint<ChangeNotice>> {
+    let cursor: string | undefined;
+    let lastSyncTime: string | undefined;
+    let totalSynced = 0;
+    let batchCount = 0;
+    const batchSize = params.batchSize || 100;
+    const maxBatches = params.maxBatches || Infinity;
+    const invalidateCache = params.invalidateCache !== false;
+
+    const filters: SyncCheckpoint['filters'] = {
+      productId: params.productId,
+      type: params.type,
+      level: params.level
+    };
+
+    if (params.checkpoint) {
+      if (params.checkpoint.syncType !== 'change_notices') {
+        throw new ParameterInvalidError(
+          'checkpoint',
+          `检查点类型不匹配，期望 change_notices，实际 ${params.checkpoint.syncType}`
+        );
+      }
+      cursor = params.checkpoint.cursor || undefined;
+      lastSyncTime = params.checkpoint.lastSyncTime;
+      totalSynced = params.checkpoint.totalSynced || 0;
+      batchCount = params.checkpoint.batchCount || 0;
+    } else {
+      lastSyncTime = params.lastSyncTime;
+    }
+
+    const createCheckpoint = (
+      currentCursor: string | null,
+      currentBatchCount: number,
+      currentTotal: number,
+      error?: { message: string; batchNumber: number }
+    ): SyncCheckpoint => ({
+      syncType: 'change_notices',
+      cursor: currentCursor,
+      lastSyncTime: lastSyncTime || new Date().toISOString(),
+      totalSynced: currentTotal,
+      batchCount: currentBatchCount,
+      lastBatchTime: new Date().toISOString(),
+      filters,
+      error: error
+        ? {
+            ...error,
+            timestamp: new Date().toISOString()
+          }
+        : undefined
+    });
+
+    let hasMore = true;
+    let lastResult: IncrementalResponse<ChangeNotice> | null = null;
+    const allAffectedProductIds = new Set<string>();
+
+    while (hasMore && batchCount < maxBatches) {
+      try {
+        const result = await this.getChangeNoticesIncremental({
+          productId: params.productId,
+          type: params.type,
+          level: params.level,
+          cursor,
+          limit: batchSize,
+          lastSyncTime
+        });
+
+        lastResult = result;
+        batchCount++;
+        totalSynced += result.list.length;
+
+        if (invalidateCache) {
+          result.list.forEach((n) => allAffectedProductIds.add(n.productId));
+        }
+
+        const checkpoint = createCheckpoint(
+          result.nextCursor,
+          batchCount,
+          totalSynced
+        );
+
+        if (params.onBatch) {
+          await params.onBatch(result.list, checkpoint, result.hasMore);
+        }
+
+        hasMore = result.hasMore;
+        cursor = result.nextCursor || undefined;
+
+        if (!hasMore) {
+          break;
+        }
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        const checkpoint = createCheckpoint(
+          cursor || null,
+          batchCount,
+          totalSynced,
+          {
+            message: err.message,
+            batchNumber: batchCount
+          }
+        );
+
+        if (invalidateCache && this.client.isCacheEnabled()) {
+          for (const productId of allAffectedProductIds) {
+            this.client.invalidateCacheByProductId(productId);
+          }
+        }
+
+        if (params.onError) {
+          await params.onError(err, checkpoint);
+        }
+
+        return {
+          list: lastResult?.list || [],
+          nextCursor: cursor || null,
+          hasMore: true,
+          total: lastResult?.total,
+          syncTime: new Date().toISOString(),
+          updatedCount: totalSynced,
+          deletedCount: 0,
+          checkpoint
+        };
+      }
+    }
+
+    if (invalidateCache && this.client.isCacheEnabled()) {
+      for (const productId of allAffectedProductIds) {
+        this.client.invalidateCacheByProductId(productId);
+      }
+    }
+
+    const finalCheckpoint = createCheckpoint(
+      cursor || null,
+      batchCount,
+      totalSynced
+    );
+
+    return {
+      list: lastResult?.list || [],
+      nextCursor: cursor || null,
+      hasMore,
+      total: lastResult?.total,
+      syncTime: new Date().toISOString(),
+      updatedCount: totalSynced,
+      deletedCount: 0,
+      checkpoint: finalCheckpoint
+    };
+  }
+
+  public createUsageRecordsCheckpoint(
+    params: {
+      authorizationId?: string;
+      productId?: string;
+      status?: 'success' | 'failed';
+      cursor?: string;
+      lastSyncTime?: string;
+      totalSynced?: number;
+      batchCount?: number;
+    }
+  ): SyncCheckpoint {
+    return {
+      syncType: 'usage_records',
+      cursor: params.cursor || null,
+      lastSyncTime: params.lastSyncTime || new Date().toISOString(),
+      totalSynced: params.totalSynced || 0,
+      batchCount: params.batchCount || 0,
+      lastBatchTime: new Date().toISOString(),
+      filters: {
+        productId: params.productId,
+        authorizationId: params.authorizationId,
+        status: params.status
+      }
+    };
+  }
+
+  public createChangeNoticesCheckpoint(
+    params: {
+      productId?: string;
+      type?: ChangeNotice['type'];
+      level?: ChangeNotice['level'];
+      cursor?: string;
+      lastSyncTime?: string;
+      totalSynced?: number;
+      batchCount?: number;
+    }
+  ): SyncCheckpoint {
+    return {
+      syncType: 'change_notices',
+      cursor: params.cursor || null,
+      lastSyncTime: params.lastSyncTime || new Date().toISOString(),
+      totalSynced: params.totalSynced || 0,
+      batchCount: params.batchCount || 0,
+      lastBatchTime: new Date().toISOString(),
+      filters: {
+        productId: params.productId,
+        type: params.type,
+        level: params.level
+      }
     };
   }
 

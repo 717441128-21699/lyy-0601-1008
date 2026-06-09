@@ -204,7 +204,7 @@ export interface Authorization {
   applyId: string;
   productId: string;
   productName: string;
-  status: 'active' | 'expired' | 'revoked' | 'suspended';
+  status: 'active' | 'expired' | 'revoked' | 'suspended' | 'pending' | 'rejected' | 'cancelled';
   scope: {
     callLimit: number;
     callCount: number;
@@ -355,6 +355,105 @@ export interface IncrementalResponse<T> extends CursorResponse<T> {
   syncTime: string;
   updatedCount: number;
   deletedCount: number;
+}
+
+export interface SyncCheckpoint {
+  syncType: 'usage_records' | 'change_notices';
+  cursor: string | null;
+  lastSyncTime: string;
+  totalSynced: number;
+  batchCount: number;
+  lastBatchTime: string;
+  filters?: {
+    productId?: string;
+    authorizationId?: string;
+    status?: string;
+    type?: string;
+    level?: string;
+    startTime?: string;
+    endTime?: string;
+  };
+  error?: {
+    message: string;
+    batchNumber: number;
+    timestamp: string;
+  };
+  metadata?: Record<string, unknown>;
+}
+
+export interface SyncResultWithCheckpoint<T> {
+  list: T[];
+  nextCursor: string | null;
+  hasMore: boolean;
+  total?: number;
+  syncTime: string;
+  updatedCount: number;
+  deletedCount: number;
+  checkpoint: SyncCheckpoint;
+}
+
+export type AuthorizationInvalidReason =
+  | 'expired'
+  | 'calls_exhausted'
+  | 'status_suspended'
+  | 'status_revoked'
+  | 'status_pending'
+  | 'status_rejected'
+  | 'status_cancelled'
+  | 'not_found'
+  | 'unknown';
+
+export interface AuthorizationCheckResult {
+  valid: boolean;
+  reason?: AuthorizationInvalidReason;
+  reasonMessage?: string;
+  authorization?: Authorization;
+}
+
+export type BatchQueryStatus =
+  | 'success'
+  | 'network_error'
+  | 'platform_error'
+  | 'invalid_request'
+  | 'timeout'
+  | 'unknown_error';
+
+export interface DetailedBatchResult<T> {
+  id: string;
+  status: BatchQueryStatus;
+  data: T | null;
+  error?: {
+    code: number;
+    message: string;
+    traceId?: string;
+  };
+}
+
+export interface DetailedBatchResponse<T> {
+  total: number;
+  successCount: number;
+  failedCount: number;
+  summary: {
+    success: number;
+    networkError: number;
+    platformError: number;
+    invalidRequest: number;
+    timeout: number;
+    unknownError: number;
+  };
+  authorizationSummary?: {
+    valid: number;
+    expired: number;
+    callsExhausted: number;
+    suspended: number;
+    revoked: number;
+    pending: number;
+    rejected: number;
+    cancelled: number;
+    notFound: number;
+    unknown: number;
+  };
+  results: DetailedBatchResult<T>[];
 }
 
 export * from '../errors';

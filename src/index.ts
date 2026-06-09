@@ -192,6 +192,15 @@ export class DataCatalogSDK {
 }
 
 export * from './types';
+export type {
+  SyncCheckpoint,
+  SyncResultWithCheckpoint,
+  AuthorizationCheckResult,
+  AuthorizationInvalidReason,
+  BatchQueryStatus,
+  DetailedBatchResult,
+  DetailedBatchResponse
+} from './types';
 export * from './errors';
 export { HttpClient, HttpClientOptions, CacheConfig } from './client/HttpClient';
 export { CatalogSearch } from './modules/CatalogSearch';
