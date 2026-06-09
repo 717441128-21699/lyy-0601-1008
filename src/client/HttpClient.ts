@@ -281,8 +281,22 @@ export class HttpClient {
   }
 
   private extractProductId(url: string): string | undefined {
-    const match = url.match(/\/([a-z]+-\d{6})/i);
-    return match ? match[1] : undefined;
+    const patterns = [
+      /\/resources\/([^/]+)/,
+      /\/apply\/products\/([^/]+)/,
+      /\/catalog\/products\/([^/]+)/,
+      /\/authorization\/([^/]+)(?:\/|$)/,
+      /\/([a-z0-9]+(?:-[a-z0-9]+)+)/i
+    ];
+
+    for (const pattern of patterns) {
+      const match = url.match(pattern);
+      if (match && match[1] && !match[1].includes('?') && !match[1].includes('#')) {
+        return match[1];
+      }
+    }
+
+    return undefined;
   }
 
   private getCacheTags(url: string): string[] {

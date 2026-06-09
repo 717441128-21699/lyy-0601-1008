@@ -182,43 +182,36 @@ export class AuthorizationStatus {
   }> {
     validateRequiredParams({ authorizationId }, ['authorizationId']);
 
-    try {
-      const auth = await this.getAuthorizationDetail(authorizationId);
+    const auth = await this.getAuthorizationDetail(authorizationId);
 
-      if (auth.status !== 'active') {
-        return {
-          valid: false,
-          reason: `授权状态为 ${auth.status}，不可用`,
-          authorization: auth
-        };
-      }
-
-      if (dayjs(auth.validTo).isBefore(dayjs())) {
-        return {
-          valid: false,
-          reason: '授权已过期',
-          authorization: auth
-        };
-      }
-
-      if (auth.scope.callCount >= auth.scope.callLimit) {
-        return {
-          valid: false,
-          reason: '调用次数已用尽',
-          authorization: auth
-        };
-      }
-
-      return {
-        valid: true,
-        authorization: auth
-      };
-    } catch (error) {
+    if (auth.status !== 'active') {
       return {
         valid: false,
-        reason: error instanceof Error ? error.message : '未知错误'
+        reason: `授权状态为 ${auth.status}，不可用`,
+        authorization: auth
       };
     }
+
+    if (dayjs(auth.validTo).isBefore(dayjs())) {
+      return {
+        valid: false,
+        reason: '授权已过期',
+        authorization: auth
+      };
+    }
+
+    if (auth.scope.callCount >= auth.scope.callLimit) {
+      return {
+        valid: false,
+        reason: '调用次数已用尽',
+        authorization: auth
+      };
+    }
+
+    return {
+      valid: true,
+      authorization: auth
+    };
   }
 
   public async renewAuthorization(

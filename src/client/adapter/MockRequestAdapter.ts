@@ -1,5 +1,5 @@
 import { IRequestAdapter, RequestOptions } from './IRequestAdapter';
-import { ApiResponse, ErrorCode } from '../../types';
+import { ApiResponse, ErrorCode, CursorResponse, IncrementalResponse, UsageRecord, ChangeNotice } from '../../types';
 import { mockDataGenerator } from './MockDataGenerator';
 import dayjs from 'dayjs';
 
@@ -10,6 +10,12 @@ export interface MockResponseOverride {
   delay?: number;
 }
 
+interface CursorState {
+  offset: number;
+  total: number;
+  createdAt: number;
+}
+
 export class MockRequestAdapter implements IRequestAdapter {
   private baseUrl: string = '';
   private defaultHeaders: Record<string, string> = {};
@@ -18,6 +24,10 @@ export class MockRequestAdapter implements IRequestAdapter {
   private delayMs: number = 100;
   private failureRate: number = 0;
   private failOnParamValidation: boolean = true;
+  private usageRecordCursorStates = new Map<string, CursorState>();
+  private changeNoticeCursorStates = new Map<string, CursorState>();
+  private readonly TOTAL_RECORDS = 156;
+  private readonly TOTAL_NOTICES = 42;
 
   constructor(options?: {
     baseUrl?: string;
@@ -117,8 +127,193 @@ export class MockRequestAdapter implements IRequestAdapter {
   }
 
   private extractProductId(url: string): string | undefined {
-    const match = url.match(/\/([a-z]+-?[a-z]*-?\d+)/i);
-    return match ? match[1] : undefined;
+    const patterns = [
+      /\/resources\/([^/]+)/,
+      /\/apply\/products\/([^/]+)/,
+      /\/catalog\/products\/([^/]+)/,
+      /\/authorization\/([^/]+)(?:\/|$)/,
+      /\/apply\/([^/]+)(?:\/|$)/,
+      /\/usage\/notices\/([^/]+)(?:\/|$)/,
+      /\/([a-z0-9]+(?:-[a-z0-9]+)+)/i
+    ];
+
+    for (const pattern of patterns) {
+      const match = url.match(pattern);
+      if (match && match[1] && !match[1].includes('?') && !match[1].includes('#')) {
+        return match[1];
+      }
+    }
+
+    return undefined;
+  }
+
+  private getCursorKey(prefix: string, params?: Record<string, unknown>): string {
+    const productId = params?.productId as string || 'all';
+    const authorizationId = params?.authorizationId as string || 'all';
+    const status = params?.status as string || 'all';
+    const type = params?.type as string || 'all';
+    const level = params?.level as string || 'all';
+    return `${prefix}:${productId}:${authorizationId}:${status}:${type}:${level}`;
+  }
+
+  private parseCursor(cursor: string | undefined): number {
+    if (!cursor) return 0;
+    try {
+      const decoded = Buffer.from(cursor, 'base64').toString('utf8');
+      const offset = parseInt(decoded.split(':')[1] || '0', 10);
+      return isNaN(offset) ? 0 : offset;
+    } catch {
+      return 0;
+    }
+  }
+
+  private encodeCursor(offset: number): string {
+    return Buffer.from(`cursor:${offset}`).toString('base64');
+  }
+
+  private getOrCreateCursorState(
+    stateMap: Map<string, CursorState>,
+    key: string,
+    total: number,
+    lastSyncTime?: string
+  ): CursorState {
+    let state = stateMap.get(key);
+
+    if (!state || (lastSyncTime && state.createdAt < dayjs(lastSyncTime).valueOf())) {
+      state = {
+        offset: 0,
+        total,
+        createdAt: Date.now()
+      };
+      stateMap.set(key, state);
+    }
+
+    return state;
+  }
+
+  private generateCursorResponse<T>(
+    params: Record<string, unknown> | undefined,
+    stateMap: Map<string, CursorState>,
+    totalRecords: number,
+    generator: () => T
+  ): CursorResponse<T> {
+    const limit = (params?.limit as number) || 20;
+    const cursor = params?.cursor as string | undefined;
+    const lastSyncTime = params?.lastSyncTime as string | undefined;
+    const key = this.getCursorKey('cursor', params);
+
+    const state = this.getOrCreateCursorState(stateMap, key, totalRecords, lastSyncTime);
+
+    const offset = cursor ? this.parseCursor(cursor) : state.offset;
+    const actualLimit = Math.min(limit, 1000);
+    const remaining = state.total - offset;
+    const fetchCount = Math.min(actualLimit, remaining);
+
+    const list = Array.from({ length: fetchCount }, () => generator());
+
+    const newOffset = offset + fetchCount;
+    state.offset = newOffset;
+
+    const hasMore = newOffset < state.total;
+    const nextCursor = hasMore ? this.encodeCursor(newOffset) : null;
+
+    return {
+      list,
+      nextCursor,
+      hasMore,
+      total: state.total
+    };
+  }
+
+  private generateIncrementalResponse<T>(
+    params: Record<string, unknown> | undefined,
+    stateMap: Map<string, CursorState>,
+    totalRecords: number,
+    generator: () => T
+  ): IncrementalResponse<T> {
+    const cursorResponse = this.generateCursorResponse(params, stateMap, totalRecords, generator);
+    const syncTime = dayjs().toISOString();
+
+    const updatedCount = cursorResponse.list.length;
+    const deletedCount = 0;
+
+    return {
+      ...cursorResponse,
+      syncTime,
+      updatedCount,
+      deletedCount
+    };
+  }
+
+  private validateMaterials(materials: unknown): { valid: boolean; errorCode?: number; errorMessage?: string } {
+    if (!this.failOnParamValidation) {
+      return { valid: true };
+    }
+
+    if (materials === undefined || materials === null) {
+      return {
+        valid: false,
+        errorCode: ErrorCode.MATERIAL_MISSING,
+        errorMessage: '缺少申请材料: materials'
+      };
+    }
+
+    if (!Array.isArray(materials)) {
+      return {
+        valid: false,
+        errorCode: ErrorCode.PARAM_INVALID,
+        errorMessage: '参数 materials 无效: 必须是数组类型'
+      };
+    }
+
+    if (materials.length === 0) {
+      return {
+        valid: false,
+        errorCode: ErrorCode.MATERIAL_MISSING,
+        errorMessage: '缺少申请材料: 材料列表不能为空'
+      };
+    }
+
+    for (let i = 0; i < materials.length; i++) {
+      const material = materials[i];
+      if (!material || typeof material !== 'object') {
+        return {
+          valid: false,
+          errorCode: ErrorCode.MATERIAL_INVALID,
+          errorMessage: `申请材料 ${i} 无效: 格式不正确`
+        };
+      }
+
+      const mat = material as Record<string, unknown>;
+
+      if (!mat.name || typeof mat.name !== 'string' || mat.name.trim() === '') {
+        return {
+          valid: false,
+          errorCode: ErrorCode.MATERIAL_INVALID,
+          errorMessage: `申请材料 ${i} 无效: 缺少材料名称`
+        };
+      }
+
+      if (mat.required !== false && (!mat.uploaded || mat.uploaded === false)) {
+        return {
+          valid: false,
+          errorCode: ErrorCode.MATERIAL_MISSING,
+          errorMessage: `缺少申请材料: ${mat.name}`
+        };
+      }
+
+      if (mat.uploaded === true) {
+        if (!mat.fileUrl || typeof mat.fileUrl !== 'string' || mat.fileUrl.trim() === '') {
+          return {
+            valid: false,
+            errorCode: ErrorCode.MATERIAL_INVALID,
+            errorMessage: `申请材料 ${mat.name as string} 无效: 缺少文件地址`
+          };
+        }
+      }
+    }
+
+    return { valid: true };
   }
 
   async request<T>(options: RequestOptions): Promise<ApiResponse<T>> {
@@ -305,7 +500,8 @@ export class MockRequestAdapter implements IRequestAdapter {
 
     if (url.includes('/apply/submit')) {
       const data = options.data;
-      const missing = this.validateParams(data, [
+
+      const paramMissing = this.validateParams(data, [
         'productId',
         'purpose',
         'purposeDescription',
@@ -319,12 +515,28 @@ export class MockRequestAdapter implements IRequestAdapter {
         'organization',
         'department'
       ]);
-      if (missing.length > 0) {
+
+      if (paramMissing.length > 0) {
+        if (paramMissing.includes('materials')) {
+          return this.generateErrorResponse(
+            ErrorCode.MATERIAL_MISSING,
+            '缺少申请材料: materials'
+          ) as ApiResponse<T>;
+        }
         return this.generateErrorResponse(
           ErrorCode.PARAM_MISSING,
-          `缺少必填参数: ${missing.join(', ')}`
+          `缺少必填参数: ${paramMissing.join(', ')}`
         ) as ApiResponse<T>;
       }
+
+      const materialsValidation = this.validateMaterials(data?.materials);
+      if (!materialsValidation.valid && materialsValidation.errorCode) {
+        return this.generateErrorResponse(
+          materialsValidation.errorCode,
+          materialsValidation.errorMessage || '材料验证失败'
+        ) as ApiResponse<T>;
+      }
+
       return this.generateSuccessResponse(
         mockDataGenerator.generateApplyResponse(data?.productId as string)
       ) as ApiResponse<T>;
@@ -473,6 +685,42 @@ export class MockRequestAdapter implements IRequestAdapter {
       }) as ApiResponse<T>;
     }
 
+    if (url.includes('/usage/records/cursor')) {
+      const missing = this.validateParams(params, []);
+      if (missing.length > 0) {
+        return this.generateErrorResponse(
+          ErrorCode.PARAM_MISSING,
+          `缺少必填参数: ${missing.join(', ')}`
+        ) as ApiResponse<T>;
+      }
+      return this.generateSuccessResponse(
+        this.generateCursorResponse<UsageRecord>(
+          params,
+          this.usageRecordCursorStates,
+          this.TOTAL_RECORDS,
+          () => mockDataGenerator.generateUsageRecord()
+        )
+      ) as ApiResponse<T>;
+    }
+
+    if (url.includes('/usage/records/incremental')) {
+      const missing = this.validateParams(params, []);
+      if (missing.length > 0) {
+        return this.generateErrorResponse(
+          ErrorCode.PARAM_MISSING,
+          `缺少必填参数: ${missing.join(', ')}`
+        ) as ApiResponse<T>;
+      }
+      return this.generateSuccessResponse(
+        this.generateIncrementalResponse<UsageRecord>(
+          params,
+          this.usageRecordCursorStates,
+          this.TOTAL_RECORDS,
+          () => mockDataGenerator.generateUsageRecord()
+        )
+      ) as ApiResponse<T>;
+    }
+
     if (url.includes('/usage/records')) {
       const page = (params?.page as number) || 1;
       const pageSize = (params?.pageSize as number) || 20;
@@ -495,6 +743,42 @@ export class MockRequestAdapter implements IRequestAdapter {
         recordId: mockDataGenerator['generateId']('usage'),
         recordedAt: dayjs().toISOString()
       }) as ApiResponse<T>;
+    }
+
+    if (url.includes('/usage/notices/cursor')) {
+      const missing = this.validateParams(params, []);
+      if (missing.length > 0) {
+        return this.generateErrorResponse(
+          ErrorCode.PARAM_MISSING,
+          `缺少必填参数: ${missing.join(', ')}`
+        ) as ApiResponse<T>;
+      }
+      return this.generateSuccessResponse(
+        this.generateCursorResponse<ChangeNotice>(
+          params,
+          this.changeNoticeCursorStates,
+          this.TOTAL_NOTICES,
+          () => mockDataGenerator.generateChangeNotice()
+        )
+      ) as ApiResponse<T>;
+    }
+
+    if (url.includes('/usage/notices/incremental')) {
+      const missing = this.validateParams(params, []);
+      if (missing.length > 0) {
+        return this.generateErrorResponse(
+          ErrorCode.PARAM_MISSING,
+          `缺少必填参数: ${missing.join(', ')}`
+        ) as ApiResponse<T>;
+      }
+      return this.generateSuccessResponse(
+        this.generateIncrementalResponse<ChangeNotice>(
+          params,
+          this.changeNoticeCursorStates,
+          this.TOTAL_NOTICES,
+          () => mockDataGenerator.generateChangeNotice()
+        )
+      ) as ApiResponse<T>;
     }
 
     if (url.includes('/usage/notices') && method === 'GET') {

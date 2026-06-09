@@ -356,6 +356,7 @@ export class ApplySubmit {
         usageDuration: request.usageDuration,
         usageScope: request.usageScope,
         expectedCallVolume: request.expectedCallVolume,
+        materials: request.materials,
         contactName: request.contactName,
         contactPhone: request.contactPhone,
         contactEmail: request.contactEmail,
@@ -369,6 +370,7 @@ export class ApplySubmit {
         'usageDuration',
         'usageScope',
         'expectedCallVolume',
+        'materials',
         'contactName',
         'contactPhone',
         'contactEmail',
@@ -376,6 +378,45 @@ export class ApplySubmit {
         'department'
       ]
     );
+
+    if (!Array.isArray(request.materials)) {
+      throw new ParameterInvalidError('materials', '必须是数组类型');
+    }
+
+    if (request.materials.length === 0) {
+      throw new MaterialMissingError('申请材料列表不能为空');
+    }
+
+    for (let i = 0; i < request.materials.length; i++) {
+      const material = request.materials[i];
+
+      if (!material || typeof material !== 'object') {
+        throw new MaterialInvalidError(`材料[${i}]`, '格式不正确');
+      }
+
+      if (!material.name || typeof material.name !== 'string' || material.name.trim() === '') {
+        throw new MaterialInvalidError(`材料[${i}]`, '缺少材料名称');
+      }
+
+      if (material.required !== false && !material.uploaded) {
+        throw new MaterialMissingError(material.name);
+      }
+
+      if (material.uploaded) {
+        if (!material.fileUrl || typeof material.fileUrl !== 'string' || material.fileUrl.trim() === '') {
+          throw new MaterialInvalidError(material.name, '缺少文件地址');
+        }
+
+        const allowedTypes = ['pdf', 'doc', 'docx', 'jpg', 'jpeg', 'png'];
+        const fileExt = material.fileUrl.split('.').pop()?.toLowerCase();
+        if (fileExt && !allowedTypes.includes(fileExt)) {
+          throw new MaterialInvalidError(
+            material.name,
+            `不支持的文件格式 ${fileExt}，支持格式: ${allowedTypes.join(', ')}`
+          );
+        }
+      }
+    }
 
     validateParamEnum('purpose', request.purpose, Object.values(ApplyPurpose));
 
